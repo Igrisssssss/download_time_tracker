@@ -20,7 +20,7 @@ import {
   Menu,
   X
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 export default function Layout() {
   const { user, logout } = useAuth();
@@ -31,6 +31,7 @@ export default function Layout() {
   const [notifications, setNotifications] = useState<any[]>([]);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const notificationsRef = useRef<HTMLDivElement | null>(null);
   const isAdminView = user?.role === 'admin' || user?.role === 'manager';
   const navigation = useMemo(
     () => [
@@ -78,6 +79,25 @@ export default function Layout() {
       clearInterval(interval);
     };
   }, []);
+
+  useEffect(() => {
+    const handleOutside = (event: MouseEvent | TouchEvent) => {
+      if (!notificationsOpen) return;
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (notificationsRef.current && !notificationsRef.current.contains(target)) {
+        setNotificationsOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('touchstart', handleOutside);
+
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('touchstart', handleOutside);
+    };
+  }, [notificationsOpen]);
 
   useEffect(() => {
     let active = true;
@@ -149,7 +169,7 @@ export default function Layout() {
             <div className="flex-1" />
             
             <div className="flex items-center gap-4">
-              <div className="relative">
+              <div className="relative" ref={notificationsRef}>
                 <button
                   onClick={() => setNotificationsOpen((prev) => !prev)}
                   className="relative p-2 rounded-lg border border-gray-200 hover:bg-gray-50"

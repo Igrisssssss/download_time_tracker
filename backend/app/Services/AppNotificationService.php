@@ -30,7 +30,8 @@ class AppNotificationService
                     'type' => $type,
                     'title' => $title,
                     'message' => $message,
-                    'meta' => $meta,
+                    // insert() bypasses Eloquent casts, so JSON must be encoded explicitly.
+                    'meta' => $meta ? json_encode($meta) : null,
                     'is_read' => false,
                     'created_at' => now(),
                     'updated_at' => now(),

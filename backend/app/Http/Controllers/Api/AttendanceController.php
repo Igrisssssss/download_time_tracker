@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\AttendancePunch;
 use App\Models\AttendanceRecord;
 use App\Models\LeaveRequest;
+use App\Models\TimeEntry;
 use App\Models\User;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
@@ -88,6 +89,21 @@ class AttendanceController extends Controller
             'punch_in_at' => $checkInAt,
         ]);
 
+        $runningPrimary = TimeEntry::where('user_id', $user->id)
+            ->where('timer_slot', 'primary')
+            ->whereNull('end_time')
+            ->exists();
+        if (!$runningPrimary) {
+            TimeEntry::create([
+                'user_id' => $user->id,
+                'project_id' => null,
+                'task_id' => null,
+                'description' => 'Auto timer started from punch in',
+                'start_time' => $checkInAt,
+                'timer_slot' => 'primary',
+            ]);
+        }
+
         return response()->json([
             'message' => 'Punched in successfully',
             'record' => $this->decorateRecord($record->fresh('punches')),
@@ -130,6 +146,22 @@ class AttendanceController extends Controller
             'worked_seconds' => (int) $workedSeconds,
             'status' => 'present',
         ]);
+
+        $runningPrimary = TimeEntry::where('user_id', $user->id)
+            ->where('timer_slot', 'primary')
+            ->whereNull('end_time')
+            ->orderByDesc('start_time')
+            ->first();
+        if ($runningPrimary) {
+            $runningDuration = max(
+                0,
+                now()->getTimestamp() - Carbon::parse($runningPrimary->start_time)->getTimestamp()
+            );
+            $runningPrimary->update([
+                'end_time' => now(),
+                'duration' => (int) $runningDuration,
+            ]);
+        }
 
         return response()->json([
             'message' => 'Punched out successfully',

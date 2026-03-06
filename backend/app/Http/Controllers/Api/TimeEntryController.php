@@ -3,6 +3,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AttendancePunch;
+use App\Models\AttendanceRecord;
+use App\Models\LeaveRequest;
 use App\Models\TimeEntry;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
@@ -124,6 +127,13 @@ class TimeEntryController extends Controller
         }
         $slot = $request->get('timer_slot', 'primary');
 
+        if ($slot === 'primary') {
+            $attendanceGuard = $this->ensureAttendanceCheckedIn($user);
+            if ($attendanceGuard) {
+                return $attendanceGuard;
+            }
+        }
+
         $runningQuery = TimeEntry::where('user_id', $user->id)->whereNull('end_time');
         if ($slot !== 'primary') {
             $runningQuery->where('timer_slot', $slot);
@@ -193,6 +203,10 @@ class TimeEntryController extends Controller
             'duration' => (int) $durationSeconds,
         ]);
 
+        if ($slot === 'primary') {
+            $this->ensureAttendanceCheckedOutForBreak($user->id);
+        }
+
         return response()->json($timeEntry);
     }
 
@@ -256,5 +270,89 @@ class TimeEntryController extends Controller
     {
         $user = request()->user();
         return $user && $timeEntry->user_id === $user->id;
+    }
+
+    private function ensureAttendanceCheckedIn($user)
+    {
+        $today = now()->toDateString();
+        if ($this->hasApprovedLeaveOnDate((int) $user->organization_id, (int) $user->id, $today)) {
+            return response()->json(['message' => 'You are on approved leave today. Timer cannot start.'], 422);
+        }
+
+        $record = AttendanceRecord::firstOrNew([
+            'user_id' => $user->id,
+            'attendance_date' => $today,
+        ]);
+        $record->organization_id = $user->organization_id;
+        $record->status = 'present';
+
+        $now = now();
+        if (!$record->check_in_at) {
+            $lateThreshold = Carbon::parse($today.' '.env('ATTENDANCE_LATE_AFTER', '09:30:00'));
+            $record->check_in_at = $now;
+            $record->late_minutes = max(0, $lateThreshold->diffInMinutes($now, false));
+        }
+        $record->save();
+
+        $openPunch = AttendancePunch::where('attendance_record_id', $record->id)
+            ->whereNull('punch_out_at')
+            ->first();
+
+        if (!$openPunch) {
+            AttendancePunch::create([
+                'organization_id' => $user->organization_id,
+                'user_id' => $user->id,
+                'attendance_record_id' => $record->id,
+                'punch_in_at' => $now,
+            ]);
+        }
+
+        return null;
+    }
+
+    private function ensureAttendanceCheckedOutForBreak(int $userId): void
+    {
+        $today = now()->toDateString();
+        $record = AttendanceRecord::where('user_id', $userId)
+            ->whereDate('attendance_date', $today)
+            ->first();
+        if (!$record) {
+            return;
+        }
+
+        $openPunch = AttendancePunch::where('attendance_record_id', $record->id)
+            ->whereNull('punch_out_at')
+            ->orderByDesc('punch_in_at')
+            ->first();
+        if (!$openPunch) {
+            return;
+        }
+
+        $checkOutAt = now();
+        $sessionWorkedSeconds = max(0, Carbon::parse($openPunch->punch_in_at)->diffInSeconds($checkOutAt));
+        $openPunch->update([
+            'punch_out_at' => $checkOutAt,
+            'worked_seconds' => (int) $sessionWorkedSeconds,
+        ]);
+
+        $closedWorked = (int) AttendancePunch::where('attendance_record_id', $record->id)
+            ->whereNotNull('punch_out_at')
+            ->sum('worked_seconds');
+
+        $record->update([
+            'check_out_at' => $checkOutAt,
+            'worked_seconds' => $closedWorked,
+            'status' => 'present',
+        ]);
+    }
+
+    private function hasApprovedLeaveOnDate(int $organizationId, int $userId, string $date): bool
+    {
+        return LeaveRequest::where('organization_id', $organizationId)
+            ->where('user_id', $userId)
+            ->where('status', 'approved')
+            ->whereDate('start_date', '<=', $date)
+            ->whereDate('end_date', '>=', $date)
+            ->exists();
     }
 }

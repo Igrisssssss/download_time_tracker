@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
-import { timeEntryApi, dashboardApi, projectApi } from '@/services/api';
+import { attendanceApi, attendanceTimeEditApi, timeEntryApi, dashboardApi, projectApi } from '@/services/api';
 import { 
   Clock, 
   Play, 
@@ -41,6 +41,13 @@ export default function Dashboard() {
   const [todayDeltaLabel, setTodayDeltaLabel] = useState('No change from yesterday');
   const [isLoading, setIsLoading] = useState(true);
   const [isStarting, setIsStarting] = useState(false);
+  const [attendanceToday, setAttendanceToday] = useState<any | null>(null);
+  const [shiftTargetSeconds, setShiftTargetSeconds] = useState(8 * 3600);
+  const [workedBaseSeconds, setWorkedBaseSeconds] = useState(0);
+  const [timerBaseSeconds, setTimerBaseSeconds] = useState(0);
+  const [isSubmittingOvertime, setIsSubmittingOvertime] = useState(false);
+  const [notice, setNotice] = useState('');
+  const autoStartAttemptedRef = useRef(false);
 
   useEffect(() => {
     fetchData();
@@ -85,12 +92,14 @@ export default function Dashboard() {
 
   const fetchData = async () => {
     try {
-      const [dashboardResponse, projectsResponse] = await Promise.all([
+      const [dashboardResponse, projectsResponse, attendanceResponse] = await Promise.all([
         dashboardApi.summary(),
         projectApi.getAll(),
+        attendanceApi.today(),
       ]);
       const data = dashboardResponse.data as any;
       const fetchedProjects = projectsResponse.data || [];
+      const attendancePayload = attendanceResponse.data as any;
 
       const activeFromApi = data?.active_timer || null;
       setActiveTimer(activeFromApi);
@@ -117,6 +126,22 @@ export default function Dashboard() {
         const elapsed = Number(data?.today_total_elapsed_duration ?? data?.today_total_duration ?? 0) || 0;
         setTodayDeltaLabel(elapsed > 0 ? 'Started today' : 'No change from yesterday');
       }
+
+      const attendanceRecord = attendancePayload?.record || null;
+      setAttendanceToday(attendanceRecord);
+      setShiftTargetSeconds(Number(attendancePayload?.shift_target_seconds || attendanceRecord?.shift_target_seconds || 8 * 3600));
+      setWorkedBaseSeconds(Number(attendanceRecord?.worked_seconds || 0));
+      setTimerBaseSeconds(Number(activeFromApi?.duration || 0));
+
+      const shouldAutoStart =
+        !activeFromApi &&
+        !autoStartAttemptedRef.current &&
+        (!attendanceRecord || attendanceRecord?.is_checked_in);
+
+      if (shouldAutoStart) {
+        autoStartAttemptedRef.current = true;
+        await handleStartTimer(true);
+      }
     } catch (error) {
       console.error('Error fetching data:', error);
     } finally {
@@ -124,14 +149,14 @@ export default function Dashboard() {
     }
   };
 
-  const handleStartTimer = async () => {
-    if (!selectedProjectId) {
-      return;
-    }
-
+  const handleStartTimer = async (isAuto = false) => {
     setIsStarting(true);
     try {
-      const response = await timeEntryApi.start({ project_id: selectedProjectId, timer_slot: 'primary' });
+      const response = await timeEntryApi.start({
+        project_id: selectedProjectId || undefined,
+        timer_slot: 'primary',
+        description: isAuto ? 'Auto timer started on login' : undefined,
+      });
       setActiveTimer(response.data);
       localStorage.setItem(
         ACTIVE_TIMER_KEY,
@@ -142,8 +167,12 @@ export default function Dashboard() {
           description: response.data.description ?? '',
         })
       );
-    } catch (error) {
+      await fetchData();
+    } catch (error: any) {
       console.error('Error starting timer:', error);
+      if (!isAuto) {
+        setNotice(error?.response?.data?.message || 'Failed to start timer');
+      }
     } finally {
       setIsStarting(false);
     }
@@ -172,6 +201,7 @@ export default function Dashboard() {
         setTodayEntries(todayResponse.data.time_entries);
         setTodayTotal(todayResponse.data.total_duration);
       }
+      await fetchData();
     } catch (error) {
       const status = (error as any)?.response?.status;
       if (status === 404) {
@@ -181,6 +211,36 @@ export default function Dashboard() {
         return;
       }
       console.error('Error stopping timer:', error);
+    }
+  };
+
+  const currentWorkedSeconds = Math.max(
+    0,
+    workedBaseSeconds + (activeTimer ? Math.max(0, liveDuration - timerBaseSeconds) : 0)
+  );
+  const remainingShiftSeconds = Math.max(0, shiftTargetSeconds - currentWorkedSeconds);
+  const overtimeSeconds = Math.max(0, currentWorkedSeconds - shiftTargetSeconds);
+
+  const submitOvertimeProof = async () => {
+    if (overtimeSeconds < 60) {
+      setNotice('Overtime is less than 1 minute.');
+      return;
+    }
+
+    setIsSubmittingOvertime(true);
+    setNotice('');
+    try {
+      const todayDate = attendanceToday?.attendance_date || new Date().toISOString().split('T')[0];
+      await attendanceTimeEditApi.create({
+        attendance_date: todayDate,
+        extra_minutes: Math.ceil(overtimeSeconds / 60),
+        message: `Auto overtime proof from dashboard timer. Overtime: ${formatDuration(overtimeSeconds)}.`,
+      });
+      setNotice('Overtime proof sent to admin automatically.');
+    } catch (e: any) {
+      setNotice(e?.response?.data?.message || 'Failed to submit overtime proof.');
+    } finally {
+      setIsSubmittingOvertime(false);
     }
   };
 
@@ -233,6 +293,16 @@ export default function Dashboard() {
             <div className="text-5xl font-bold tracking-tight">
               {activeTimer ? formatTime(liveDuration) : '00:00:00'}
             </div>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+              <div className="bg-white/10 border border-white/20 rounded-lg px-3 py-2">
+                <p className="text-primary-100 text-xs">Shift Remaining</p>
+                <p className="font-semibold">{formatTime(remainingShiftSeconds)}</p>
+              </div>
+              <div className="bg-white/10 border border-white/20 rounded-lg px-3 py-2">
+                <p className="text-primary-100 text-xs">Overtime Timer</p>
+                <p className="font-semibold">{formatTime(overtimeSeconds)}</p>
+              </div>
+            </div>
             {activeTimer?.description && (
               <p className="text-primary-100 mt-2">{activeTimer.description}</p>
             )}
@@ -241,8 +311,8 @@ export default function Dashboard() {
             )}
           </div>
           <button
-            onClick={activeTimer ? handleStopTimer : handleStartTimer}
-            disabled={isStarting || (!activeTimer && !selectedProjectId)}
+            onClick={() => (activeTimer ? handleStopTimer() : handleStartTimer())}
+            disabled={isStarting}
             className={`h-16 w-16 rounded-full flex items-center justify-center transition-all ${
               activeTimer 
                 ? 'bg-white/20 hover:bg-white/30' 
@@ -274,7 +344,17 @@ export default function Dashboard() {
           </div>
         )}
         <div className="mt-4 text-sm text-primary-100">
-          Total elapsed (all sessions): {formatDuration(allTimeTotal)}
+          Total elapsed (all sessions): {formatDuration(allTimeTotal)} | Today's attendance worked: {formatDuration(currentWorkedSeconds)}
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            onClick={submitOvertimeProof}
+            disabled={isSubmittingOvertime || overtimeSeconds < 60}
+            className="px-3 py-1.5 text-xs rounded-md bg-white text-primary-700 hover:bg-primary-50 disabled:opacity-60"
+          >
+            {isSubmittingOvertime ? 'Sending...' : 'Send Overtime Proof to Admin'}
+          </button>
+          {notice ? <span className="text-xs text-primary-50">{notice}</span> : null}
         </div>
       </div>
 
