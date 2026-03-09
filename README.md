@@ -109,7 +109,7 @@ Example backend `.env`:
 ```env
 APP_URL=https://your-backend-domain.com
 FRONTEND_URL=https://your-frontend-domain.com
-DESKTOP_WINDOWS_DOWNLOAD_URL=https://github.com/Igrisssssss/download_time_tracker/releases/latest/download/TimeTrack%20Pro-Setup-1.0.0-x64.exe
+DESKTOP_WINDOWS_DOWNLOAD_URL=https://github.com/Igrisssssss/download_time_tracker/releases/download/v1.0.0/TimeTrack.Pro-Setup-1.0.0-x64.exe
 ```
 
 Example frontend `.env`:
