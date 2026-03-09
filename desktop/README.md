@@ -47,6 +47,8 @@ Output files are generated in `desktop/release/`. You will get files similar to:
 
 Use the `Setup` `.exe` as the main installer you upload to GitHub Releases.
 
+Desktop and installer icons are loaded from `desktop/assets/icon.ico` and `desktop/assets/icon.png`.
+
 ## Share download link
 
 After uploading the installer asset to GitHub Releases, point the web login button at:

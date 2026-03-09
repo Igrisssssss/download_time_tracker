@@ -14,9 +14,11 @@
   "build": {
     "appId": "com.timetrackpro.desktop",
     "productName": "TimeTrack Pro",
+    "icon": "assets/icon.ico",
     "files": [
       "main.cjs",
       "preload.cjs",
+      "assets/**/*",
       "package.json"
     ],
     "directories": {
@@ -27,6 +29,7 @@
       "target": [
         "nsis"
       ],
+      "icon": "assets/icon.ico",
       "signAndEditExecutable": false,
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },

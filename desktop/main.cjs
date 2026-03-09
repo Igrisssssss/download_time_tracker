@@ -2,6 +2,7 @@ const { app, BrowserWindow, desktopCapturer, ipcMain, powerMonitor, shell } = re
 const path = require('path');
 
 const APP_URL = process.env.APP_URL || 'http://localhost:5173';
+const APP_ICON = path.join(__dirname, 'assets', 'icon.png');
 
 const createWindow = () => {
   const mainWindow = new BrowserWindow({
@@ -9,6 +10,7 @@ const createWindow = () => {
     height: 860,
     minWidth: 1024,
     minHeight: 720,
+    icon: APP_ICON,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -51,4 +53,3 @@ app.on('window-all-closed', () => {
     app.quit();
   }
 });
-
