@@ -135,6 +135,7 @@ Route::middleware('api.token')->group(function () {
     Route::patch('/payroll/records/{id}', [PayrollController::class, 'updateRecord']);
     Route::post('/payroll/records/{id}/status', [PayrollController::class, 'updateRecordStatus']);
     Route::post('/payroll/records/{id}/payout', [PayrollController::class, 'payoutRecord']);
+    Route::post('/payroll/records/{id}/sync-stripe-checkout', [PayrollController::class, 'syncStripeCheckout']);
     Route::get('/payroll/records/{id}/transactions', [PayrollController::class, 'recordTransactions']);
 
     // Notifications

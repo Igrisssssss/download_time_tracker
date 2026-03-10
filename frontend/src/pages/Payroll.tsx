@@ -93,12 +93,31 @@ export default function Payroll() {
   }, [filterEmployeeId, filterMonth, filterPayrollStatus, filterPayoutStatus]);
 
   useEffect(() => {
-    const payment = new URLSearchParams(window.location.search).get('payment');
-    if (payment === 'success') {
-      setMessage('Stripe payment completed. Payout status will update shortly.');
-    } else if (payment === 'cancelled') {
-      setError('Stripe payment was cancelled.');
-    }
+    const params = new URLSearchParams(window.location.search);
+    const payment = params.get('payment');
+    const payrollId = Number(params.get('payroll_id') || 0);
+    const checkoutSessionId = params.get('checkout_session_id') || '';
+
+    const run = async () => {
+      if (payment === 'success' && payrollId > 0 && checkoutSessionId) {
+        try {
+          await payrollApi.syncStripeCheckout(payrollId, checkoutSessionId);
+          setMessage('Stripe payment completed and payroll status synchronized.');
+          await load();
+        } catch (e: any) {
+          setError(e?.response?.data?.message || 'Stripe payment completed but status sync failed.');
+        }
+        return;
+      }
+
+      if (payment === 'success') {
+        setMessage('Stripe payment completed. Payout status will update shortly.');
+      } else if (payment === 'cancelled') {
+        setError('Stripe payment was cancelled.');
+      }
+    };
+
+    run();
   }, []);
 
   const onSelectRecord = async (record: PayrollRecord) => {

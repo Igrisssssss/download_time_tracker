@@ -450,7 +450,7 @@ export const attendanceTimeEditApi = {
       }>;
     }>('/attendance-time-edit-requests', { params }),
 
-  create: (data: { attendance_date: string; extra_minutes: number; message?: string }) =>
+  create: (data: { attendance_date: string; extra_minutes: number; message?: string; worked_seconds?: number; overtime_seconds?: number }) =>
     api.post('/attendance-time-edit-requests', data),
 
   approve: (id: number, review_note?: string) =>
@@ -570,6 +570,12 @@ export const payrollApi = {
     simulate_status?: 'success' | 'failed' | 'pending';
   }) =>
     api.post<{ mode: 'mock' | 'stripe_test' | 'stripe_live'; payroll: PayrollRecord; transaction: PayrollTransaction; checkout_url?: string | null }>(`/payroll/records/${id}/payout`, data || {}),
+
+  syncStripeCheckout: (id: number, checkout_session_id: string) =>
+    api.post<{ mode: 'mock' | 'stripe_test' | 'stripe_live'; payroll: PayrollRecord; transaction: PayrollTransaction; status: 'pending' | 'success' | 'failed' }>(
+      `/payroll/records/${id}/sync-stripe-checkout`,
+      { checkout_session_id }
+    ),
 
   getRecordTransactions: (id: number) =>
     api.get<{ data: PayrollTransaction[] }>(`/payroll/records/${id}/transactions`),

@@ -222,8 +222,8 @@ export default function Dashboard() {
   const overtimeSeconds = Math.max(0, currentWorkedSeconds - shiftTargetSeconds);
 
   const submitOvertimeProof = async () => {
-    if (overtimeSeconds < 60) {
-      setNotice('Overtime is less than 1 minute.');
+    if (overtimeSeconds <= 0) {
+      setNotice('Overtime has not started yet.');
       return;
     }
 
@@ -234,9 +234,11 @@ export default function Dashboard() {
       await attendanceTimeEditApi.create({
         attendance_date: todayDate,
         extra_minutes: Math.ceil(overtimeSeconds / 60),
+        worked_seconds: currentWorkedSeconds,
+        overtime_seconds: overtimeSeconds,
         message: `Auto overtime proof from dashboard timer. Overtime: ${formatDuration(overtimeSeconds)}.`,
       });
-      setNotice('Overtime proof sent to admin automatically.');
+      setNotice(`Overtime proof sent to admin. Worked: ${formatDuration(currentWorkedSeconds)}, Overtime: ${formatDuration(overtimeSeconds)}.`);
     } catch (e: any) {
       setNotice(e?.response?.data?.message || 'Failed to submit overtime proof.');
     } finally {
@@ -349,7 +351,7 @@ export default function Dashboard() {
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <button
             onClick={submitOvertimeProof}
-            disabled={isSubmittingOvertime || overtimeSeconds < 60}
+            disabled={isSubmittingOvertime || overtimeSeconds <= 0}
             className="px-3 py-1.5 text-xs rounded-md bg-white text-primary-700 hover:bg-primary-50 disabled:opacity-60"
           >
             {isSubmittingOvertime ? 'Sending...' : 'Send Overtime Proof to Admin'}

@@ -6,11 +6,16 @@ use App\Http\Controllers\Controller;
 use App\Models\AttendanceRecord;
 use App\Models\AttendanceTimeEditRequest;
 use App\Models\User;
+use App\Services\AppNotificationService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 
 class AttendanceTimeEditRequestController extends Controller
 {
+    public function __construct(private readonly AppNotificationService $notificationService)
+    {
+    }
+
     public function index(Request $request)
     {
         $request->validate([
@@ -48,6 +53,8 @@ class AttendanceTimeEditRequestController extends Controller
             'attendance_date' => 'required|date',
             'extra_minutes' => 'required|integer|min:1|max:600',
             'message' => 'nullable|string|max:2000',
+            'worked_seconds' => 'nullable|integer|min:0|max:172800',
+            'overtime_seconds' => 'nullable|integer|min:0|max:86400',
         ]);
 
         $currentUser = $request->user();
@@ -75,6 +82,48 @@ class AttendanceTimeEditRequestController extends Controller
             'message' => $request->message,
             'status' => 'pending',
         ]);
+
+        $record = AttendanceRecord::query()
+            ->where('organization_id', $currentUser->organization_id)
+            ->where('user_id', $currentUser->id)
+            ->whereDate('attendance_date', $date)
+            ->first();
+        $recordWorkedSeconds = (int) (($record?->worked_seconds ?? 0) + ($record?->manual_adjustment_seconds ?? 0));
+        $workedSeconds = max($recordWorkedSeconds, (int) $request->integer('worked_seconds', 0));
+        $overtimeSeconds = (int) max(
+            $request->integer('overtime_seconds', 0),
+            $extraSeconds,
+            max(0, $workedSeconds - $this->shiftTargetSeconds())
+        );
+
+        $adminRecipientIds = User::query()
+            ->where('organization_id', $currentUser->organization_id)
+            ->whereIn('role', ['admin', 'manager'])
+            ->pluck('id');
+
+        $this->notificationService->sendToUsers(
+            organizationId: (int) $currentUser->organization_id,
+            userIds: $adminRecipientIds,
+            senderId: (int) $currentUser->id,
+            type: 'announcement',
+            title: 'Overtime Proof Submitted',
+            message: sprintf(
+                '%s submitted overtime proof for %s. Worked: %s, Overtime: %s.',
+                (string) $currentUser->name,
+                $date,
+                $this->formatDuration($workedSeconds),
+                $this->formatDuration($overtimeSeconds)
+            ),
+            meta: [
+                'request_id' => $created->id,
+                'employee_id' => (int) $currentUser->id,
+                'employee_name' => (string) $currentUser->name,
+                'attendance_date' => $date,
+                'worked_seconds' => $workedSeconds,
+                'overtime_seconds' => $overtimeSeconds,
+                'extra_seconds' => $extraSeconds,
+            ]
+        );
 
         return response()->json([
             'message' => 'Time edit request submitted.',
@@ -157,5 +206,18 @@ class AttendanceTimeEditRequestController extends Controller
     private function canManage(User $user): bool
     {
         return in_array($user->role, ['admin', 'manager'], true);
+    }
+
+    private function shiftTargetSeconds(): int
+    {
+        return max(1, (int) env('ATTENDANCE_SHIFT_SECONDS', 8 * 3600));
+    }
+
+    private function formatDuration(int $seconds): string
+    {
+        $hours = intdiv(max(0, $seconds), 3600);
+        $minutes = intdiv(max(0, $seconds) % 3600, 60);
+
+        return sprintf('%dh %02dm', $hours, $minutes);
     }
 }

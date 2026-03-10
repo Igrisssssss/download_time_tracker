@@ -290,7 +290,7 @@ class TimeEntryController extends Controller
         if (!$record->check_in_at) {
             $lateThreshold = Carbon::parse($today.' '.env('ATTENDANCE_LATE_AFTER', '09:30:00'));
             $record->check_in_at = $now;
-            $record->late_minutes = max(0, $lateThreshold->diffInMinutes($now, false));
+            $record->late_minutes = $this->toLateMinutes($lateThreshold->diffInMinutes($now, false));
         }
         $record->save();
 
@@ -354,5 +354,10 @@ class TimeEntryController extends Controller
             ->whereDate('start_date', '<=', $date)
             ->whereDate('end_date', '>=', $date)
             ->exists();
+    }
+
+    private function toLateMinutes(int|float $rawMinutes): int
+    {
+        return (int) max(0, floor($rawMinutes));
     }
 }

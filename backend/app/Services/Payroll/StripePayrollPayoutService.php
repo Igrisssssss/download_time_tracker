@@ -30,7 +30,7 @@ class StripePayrollPayoutService implements PayrollPayoutService
 
         $response = $request->post('https://api.stripe.com/v1/checkout/sessions', [
                 'mode' => 'payment',
-                'success_url' => $successUrl.'&payroll_id='.$payroll->id,
+                'success_url' => $successUrl.'&payroll_id='.$payroll->id.'&checkout_session_id={CHECKOUT_SESSION_ID}',
                 'cancel_url' => $cancelUrl.'&payroll_id='.$payroll->id,
                 'customer_email' => (string) ($payroll->user?->email ?: ''),
                 'line_items[0][quantity]' => 1,
@@ -69,6 +69,34 @@ class StripePayrollPayoutService implements PayrollPayoutService
             'checkout_url' => $payload['url'] ?? null,
             'raw_response' => $payload,
         ];
+    }
+
+    public function fetchCheckoutSession(string $checkoutSessionId): array
+    {
+        $secret = (string) config('services.stripe.secret');
+        if ($secret === '') {
+            throw new RuntimeException('Stripe secret key is not configured.');
+        }
+
+        $request = Http::withToken($secret)->timeout(30);
+        if ((bool) config('payroll.stripe_disable_ssl_verify', false)) {
+            $request = $request->withOptions(['verify' => false]);
+        }
+
+        $response = $request->get("https://api.stripe.com/v1/checkout/sessions/{$checkoutSessionId}", [
+            'expand' => ['payment_intent'],
+        ]);
+
+        if (!$response->successful()) {
+            throw new RuntimeException('Unable to fetch Stripe checkout session status.');
+        }
+
+        $payload = $response->json();
+        if (!is_array($payload)) {
+            throw new RuntimeException('Invalid Stripe checkout session response.');
+        }
+
+        return $payload;
     }
 
     public function verifyWebhookSignature(string $payload, string $signatureHeader): bool

@@ -377,6 +377,84 @@ class PayrollController extends Controller
         ]);
     }
 
+    public function syncStripeCheckout(Request $request, int $id)
+    {
+        $request->validate([
+            'checkout_session_id' => 'required|string',
+        ]);
+
+        $record = $this->findPayrollRecord($request, $id);
+        if (!$record) {
+            return response()->json(['message' => 'Payroll record not found'], 404);
+        }
+        if ($record->payout_method !== 'stripe') {
+            return response()->json(['message' => 'Payroll payout method is not Stripe.'], 422);
+        }
+
+        try {
+            $session = $this->stripePayrollPayoutService->fetchCheckoutSession((string) $request->checkout_session_id);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+
+        $metaPayrollId = (string) ($session['metadata']['payroll_id'] ?? '');
+        if ($metaPayrollId !== '' && (int) $metaPayrollId !== (int) $record->id) {
+            return response()->json(['message' => 'Checkout session does not belong to this payroll record.'], 422);
+        }
+
+        $paymentStatus = (string) ($session['payment_status'] ?? '');
+        $checkoutStatus = (string) ($session['status'] ?? '');
+        $mappedStatus = match (true) {
+            $paymentStatus === 'paid' => 'success',
+            $checkoutStatus === 'expired' => 'failed',
+            default => 'pending',
+        };
+
+        $transaction = PayrollTransaction::query()
+            ->where('payroll_id', $record->id)
+            ->where('provider', 'stripe')
+            ->where('transaction_id', (string) $request->checkout_session_id)
+            ->latest()
+            ->first();
+
+        if (!$transaction) {
+            $transaction = PayrollTransaction::create([
+                'payroll_id' => $record->id,
+                'provider' => 'stripe',
+                'transaction_id' => (string) $request->checkout_session_id,
+                'amount' => (float) $record->net_salary,
+                'currency' => (string) config('payroll.default_currency', 'INR'),
+                'status' => $mappedStatus,
+                'raw_response' => $session,
+            ]);
+        } else {
+            $transaction->update([
+                'status' => $mappedStatus,
+                'raw_response' => $session,
+            ]);
+        }
+
+        $previousPayoutStatus = (string) $record->payout_status;
+        $record->payout_status = $mappedStatus;
+        if ($mappedStatus === 'success') {
+            $record->payroll_status = 'paid';
+            $record->paid_at = now();
+        }
+        $record->updated_by = $request->user()?->id;
+        $record->save();
+
+        if ($previousPayoutStatus !== 'success' && $mappedStatus === 'success') {
+            $this->sendPayrollPaidNotification($record->fresh('user'), $request->user()?->id);
+        }
+
+        return response()->json([
+            'mode' => $this->payrollPayoutManager->mode(),
+            'payroll' => $record->fresh()->load(['user', 'transactions']),
+            'transaction' => $transaction->fresh(),
+            'status' => $mappedStatus,
+        ]);
+    }
+
     public function stripeWebhook(Request $request)
     {
         $mode = $this->payrollPayoutManager->mode();
