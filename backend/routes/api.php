@@ -25,6 +25,7 @@ use App\Http\Controllers\Api\DesktopDownloadController;
 Route::post('/auth/register', [AuthController::class, 'register']);
 Route::post('/auth/login', [AuthController::class, 'login']);
 Route::get('/downloads/desktop/windows', [DesktopDownloadController::class, 'windows']);
+Route::post('/payroll/webhooks/stripe', [PayrollController::class, 'stripeWebhook']);
 
 // Protected routes
 Route::middleware('api.token')->group(function () {
@@ -127,6 +128,14 @@ Route::middleware('api.token')->group(function () {
     Route::post('/payroll/payslips/pay-now', [PayrollController::class, 'payNow']);
     Route::get('/payroll/payslips/{id}', [PayrollController::class, 'showPayslip']);
     Route::get('/payroll/payslips/{id}/pdf', [PayrollController::class, 'downloadPayslipPdf']);
+    Route::get('/payroll/employees', [PayrollController::class, 'employees']);
+    Route::get('/payroll/records', [PayrollController::class, 'records']);
+    Route::post('/payroll/records/generate', [PayrollController::class, 'generateRecords']);
+    Route::get('/payroll/records/{id}', [PayrollController::class, 'showRecord']);
+    Route::patch('/payroll/records/{id}', [PayrollController::class, 'updateRecord']);
+    Route::post('/payroll/records/{id}/status', [PayrollController::class, 'updateRecordStatus']);
+    Route::post('/payroll/records/{id}/payout', [PayrollController::class, 'payoutRecord']);
+    Route::get('/payroll/records/{id}/transactions', [PayrollController::class, 'recordTransactions']);
 
     // Notifications
     Route::get('/notifications', [NotificationController::class, 'index']);

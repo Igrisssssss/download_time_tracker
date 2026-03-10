@@ -346,3 +346,40 @@ export interface Payslip {
   updated_at: string;
   user?: User;
 }
+
+export interface PayrollRecord {
+  id: number;
+  organization_id: number;
+  user_id: number;
+  payroll_month: string;
+  basic_salary: number;
+  allowances: number;
+  deductions: number;
+  bonus: number;
+  tax: number;
+  net_salary: number;
+  payroll_status: 'draft' | 'processed' | 'paid';
+  payout_method: 'mock' | 'stripe';
+  payout_status: 'pending' | 'success' | 'failed';
+  generated_by?: number | null;
+  updated_by?: number | null;
+  processed_at?: string | null;
+  paid_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  user?: User;
+  transactions?: PayrollTransaction[];
+}
+
+export interface PayrollTransaction {
+  id: number;
+  payroll_id: number;
+  provider: 'mock' | 'stripe';
+  transaction_id?: string | null;
+  amount: number;
+  currency: string;
+  status: 'pending' | 'success' | 'failed';
+  raw_response?: Record<string, any> | null;
+  created_at: string;
+  updated_at: string;
+}

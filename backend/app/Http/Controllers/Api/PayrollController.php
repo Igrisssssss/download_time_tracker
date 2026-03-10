@@ -5,21 +5,477 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\PayrollAllowance;
 use App\Models\PayrollDeduction;
+use App\Models\Payroll;
+use App\Models\PayrollTransaction;
 use App\Models\PayrollStructure;
 use App\Models\Payslip;
 use App\Models\User;
 use App\Services\AppNotificationService;
+use App\Services\Payroll\PayrollCalculatorService;
+use App\Services\Payroll\PayrollPayoutManager;
+use App\Services\Payroll\StripePayrollPayoutService;
 use Carbon\Carbon;
 use Dompdf\Dompdf;
 use Dompdf\Options;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\View;
 
 class PayrollController extends Controller
 {
-    public function __construct(private readonly AppNotificationService $notificationService)
+    public function __construct(
+        private readonly AppNotificationService $notificationService,
+        private readonly PayrollCalculatorService $payrollCalculatorService,
+        private readonly PayrollPayoutManager $payrollPayoutManager,
+        private readonly StripePayrollPayoutService $stripePayrollPayoutService,
+    ) {
+    }
+
+    public function employees(Request $request)
     {
+        $currentUser = $request->user();
+        if (!$currentUser || !$currentUser->organization_id) {
+            return response()->json(['data' => []]);
+        }
+        if (!$this->canManagePayroll($currentUser)) {
+            return response()->json(['message' => 'Forbidden'], 403);
+        }
+
+        $users = User::where('organization_id', $currentUser->organization_id)
+            ->where('role', 'employee')
+            ->orderBy('name')
+            ->get(['id', 'name', 'email', 'role']);
+
+        return response()->json(['data' => $users]);
+    }
+
+    public function records(Request $request)
+    {
+        $request->validate([
+            'user_id' => 'nullable|integer',
+            'payroll_month' => ['nullable', 'regex:/^\d{4}\-\d{2}$/'],
+            'payroll_status' => 'nullable|in:draft,processed,paid',
+            'payout_status' => 'nullable|in:pending,success,failed',
+            'payout_method' => 'nullable|in:mock,stripe',
+        ]);
+
+        $currentUser = $request->user();
+        if (!$currentUser || !$currentUser->organization_id) {
+            return response()->json(['data' => [], 'mode' => $this->payrollPayoutManager->mode()]);
+        }
+        if (!$this->canManagePayroll($currentUser)) {
+            return response()->json(['message' => 'Forbidden'], 403);
+        }
+
+        $query = Payroll::with(['user', 'generatedBy', 'updatedBy'])
+            ->where('organization_id', $currentUser->organization_id)
+            ->orderByDesc('payroll_month')
+            ->orderByDesc('created_at');
+
+        if ($request->filled('user_id')) {
+            $query->where('user_id', (int) $request->user_id);
+        }
+        if ($request->filled('payroll_month')) {
+            $query->where('payroll_month', $request->payroll_month);
+        }
+        if ($request->filled('payroll_status')) {
+            $query->where('payroll_status', $request->payroll_status);
+        }
+        if ($request->filled('payout_status')) {
+            $query->where('payout_status', $request->payout_status);
+        }
+        if ($request->filled('payout_method')) {
+            $query->where('payout_method', $request->payout_method);
+        }
+
+        return response()->json([
+            'data' => $query->get(),
+            'mode' => $this->payrollPayoutManager->mode(),
+        ]);
+    }
+
+    public function generateRecords(Request $request)
+    {
+        $request->validate([
+            'payroll_month' => ['required', 'regex:/^\d{4}\-\d{2}$/'],
+            'user_id' => 'nullable|integer',
+            'allow_overwrite' => 'nullable|boolean',
+            'payout_method' => 'nullable|in:mock,stripe',
+        ]);
+
+        $currentUser = $request->user();
+        if (!$currentUser || !$currentUser->organization_id) {
+            return response()->json(['message' => 'Organization is required.'], 422);
+        }
+        if (!$this->canManagePayroll($currentUser)) {
+            return response()->json(['message' => 'Forbidden'], 403);
+        }
+
+        $periodStart = Carbon::createFromFormat('Y-m', $request->payroll_month)->startOfMonth();
+        $employees = User::where('organization_id', $currentUser->organization_id)
+            ->where('role', 'employee')
+            ->when($request->filled('user_id'), fn ($q) => $q->where('id', (int) $request->user_id))
+            ->orderBy('name')
+            ->get();
+
+        if ($employees->isEmpty()) {
+            return response()->json(['message' => 'No employees found for payroll generation.'], 404);
+        }
+
+        $allowOverwrite = (bool) $request->boolean('allow_overwrite', false);
+        $generated = [];
+        $skipped = [];
+
+        DB::transaction(function () use (
+            $employees,
+            $currentUser,
+            $request,
+            $periodStart,
+            $allowOverwrite,
+            &$generated,
+            &$skipped
+        ) {
+            foreach ($employees as $employee) {
+                $structure = $this->resolvePayrollStructure(
+                    (int) $currentUser->organization_id,
+                    (int) $employee->id,
+                    $periodStart,
+                    null
+                );
+
+                $existing = Payroll::where('organization_id', $currentUser->organization_id)
+                    ->where('user_id', $employee->id)
+                    ->where('payroll_month', $request->payroll_month)
+                    ->first();
+
+                if ($existing && !$allowOverwrite) {
+                    $skipped[] = [
+                        'employee_id' => (int) $employee->id,
+                        'reason' => 'Payroll already exists for this month',
+                    ];
+                    continue;
+                }
+
+                if ($structure) {
+                    [, $allowanceTotal] = $this->computeComponents($structure->allowances->toArray(), (float) $structure->basic_salary);
+                    [, $deductionTotal] = $this->computeComponents($structure->deductions->toArray(), (float) $structure->basic_salary);
+                    $basicSalary = round((float) $structure->basic_salary, 2);
+                    $allowances = round((float) $allowanceTotal, 2);
+                    $deductions = round((float) $deductionTotal, 2);
+                    $bonus = 0.0;
+                    $tax = 0.0;
+                } else {
+                    // Fallback: generate a draft payroll even when structure is missing.
+                    $lastPayroll = Payroll::where('organization_id', $currentUser->organization_id)
+                        ->where('user_id', $employee->id)
+                        ->orderByDesc('payroll_month')
+                        ->orderByDesc('id')
+                        ->first();
+
+                    $basicSalary = round((float) ($lastPayroll?->basic_salary ?? 0), 2);
+                    $allowances = round((float) ($lastPayroll?->allowances ?? 0), 2);
+                    $deductions = round((float) ($lastPayroll?->deductions ?? 0), 2);
+                    $bonus = round((float) ($lastPayroll?->bonus ?? 0), 2);
+                    $tax = round((float) ($lastPayroll?->tax ?? 0), 2);
+                }
+
+                $netSalary = $this->payrollCalculatorService->calculateNetSalary(
+                    $basicSalary,
+                    $allowances,
+                    $bonus,
+                    $deductions,
+                    $tax
+                );
+
+                $payload = [
+                    'basic_salary' => $basicSalary,
+                    'allowances' => $allowances,
+                    'deductions' => $deductions,
+                    'bonus' => $bonus,
+                    'tax' => $tax,
+                    'net_salary' => $netSalary,
+                    'payroll_status' => 'draft',
+                    'payout_method' => (string) ($request->payout_method ?: 'mock'),
+                    'payout_status' => 'pending',
+                    'generated_by' => $currentUser->id,
+                    'updated_by' => $currentUser->id,
+                ];
+
+                if ($existing) {
+                    $existing->update($payload);
+                    $generated[] = $existing->fresh();
+                    continue;
+                }
+
+                $generated[] = Payroll::create(array_merge($payload, [
+                    'organization_id' => $currentUser->organization_id,
+                    'user_id' => $employee->id,
+                    'payroll_month' => $request->payroll_month,
+                ]));
+            }
+        });
+
+        return response()->json([
+            'message' => 'Payroll generation completed.',
+            'generated_count' => count($generated),
+            'skipped_count' => count($skipped),
+            'generated' => collect($generated)->values(),
+            'skipped' => $skipped,
+        ]);
+    }
+
+    public function showRecord(Request $request, int $id)
+    {
+        $record = $this->findPayrollRecord($request, $id);
+        if (!$record) {
+            return response()->json(['message' => 'Payroll record not found'], 404);
+        }
+
+        return response()->json($record->load(['user', 'generatedBy', 'updatedBy', 'transactions']));
+    }
+
+    public function updateRecord(Request $request, int $id)
+    {
+        $request->validate([
+            'basic_salary' => 'nullable|numeric|min:0',
+            'allowances' => 'nullable|numeric|min:0',
+            'deductions' => 'nullable|numeric|min:0',
+            'bonus' => 'nullable|numeric|min:0',
+            'tax' => 'nullable|numeric|min:0',
+            'payroll_status' => 'nullable|in:draft,processed,paid',
+            'payout_method' => 'nullable|in:mock,stripe',
+        ]);
+
+        $record = $this->findPayrollRecord($request, $id);
+        if (!$record) {
+            return response()->json(['message' => 'Payroll record not found'], 404);
+        }
+
+        if ($record->payroll_status === 'paid') {
+            return response()->json(['message' => 'Paid payroll cannot be edited.'], 422);
+        }
+
+        $currentUser = $request->user();
+        $record->fill($request->only(['basic_salary', 'allowances', 'deductions', 'bonus', 'tax', 'payroll_status', 'payout_method']));
+        $record->net_salary = $this->payrollCalculatorService->calculateNetSalary(
+            (float) $record->basic_salary,
+            (float) $record->allowances,
+            (float) $record->bonus,
+            (float) $record->deductions,
+            (float) $record->tax
+        );
+        $record->updated_by = $currentUser?->id;
+        $record->save();
+
+        return response()->json($record->fresh()->load(['user', 'generatedBy', 'updatedBy']));
+    }
+
+    public function updateRecordStatus(Request $request, int $id)
+    {
+        $request->validate([
+            'payroll_status' => 'required|in:draft,processed,paid',
+        ]);
+
+        $record = $this->findPayrollRecord($request, $id);
+        if (!$record) {
+            return response()->json(['message' => 'Payroll record not found'], 404);
+        }
+
+        $nextStatus = (string) $request->payroll_status;
+        if ($nextStatus === 'paid' && $record->payout_status !== 'success') {
+            return response()->json(['message' => 'Payroll can be marked paid only after successful payout.'], 422);
+        }
+
+        $record->payroll_status = $nextStatus;
+        $record->processed_at = $nextStatus === 'processed' ? now() : $record->processed_at;
+        $record->paid_at = $nextStatus === 'paid' ? now() : $record->paid_at;
+        $record->updated_by = $request->user()?->id;
+        $record->save();
+
+        return response()->json($record->fresh());
+    }
+
+    public function payoutRecord(Request $request, int $id)
+    {
+        $request->validate([
+            'payout_method' => 'nullable|in:mock,stripe',
+            'simulate_status' => 'nullable|in:success,failed,pending',
+        ]);
+
+        $record = $this->findPayrollRecord($request, $id);
+        if (!$record) {
+            return response()->json(['message' => 'Payroll record not found'], 404);
+        }
+
+        if ($record->payroll_status === 'draft') {
+            return response()->json(['message' => 'Process payroll before payout.'], 422);
+        }
+        if ((float) $record->net_salary <= 0) {
+            return response()->json(['message' => 'Net salary must be greater than 0 before payout.'], 422);
+        }
+
+        $currentUser = $request->user();
+        if ($request->filled('payout_method')) {
+            $record->payout_method = (string) $request->payout_method;
+        }
+
+        try {
+            $service = $this->payrollPayoutManager->resolveForCurrentMode();
+            $result = $service->payout($record->loadMissing('user'), $request->get('simulate_status'));
+        } catch (\Throwable $e) {
+            Log::error('Payroll payout failed', [
+                'payroll_id' => $record->id,
+                'user_id' => $currentUser?->id,
+                'message' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'Payout failed: '.$e->getMessage(),
+            ], 422);
+        }
+
+        $transaction = PayrollTransaction::create([
+            'payroll_id' => $record->id,
+            'provider' => $result['provider'],
+            'transaction_id' => $result['transaction_id'] ?: null,
+            'amount' => (float) $record->net_salary,
+            'currency' => (string) config('payroll.default_currency', 'INR'),
+            'status' => $result['status'],
+            'raw_response' => $result['raw_response'],
+        ]);
+
+        $record->payout_status = $result['status'];
+        $record->updated_by = $currentUser?->id;
+        if ($result['status'] === 'success') {
+            $record->payroll_status = 'paid';
+            $record->paid_at = now();
+            $this->sendPayrollPaidNotification($record->fresh('user'), $currentUser?->id);
+        } elseif ($record->payroll_status === 'draft') {
+            $record->payroll_status = 'processed';
+            $record->processed_at = now();
+        }
+        $record->save();
+
+        return response()->json([
+            'mode' => $this->payrollPayoutManager->mode(),
+            'payroll' => $record->fresh()->load(['user', 'transactions']),
+            'transaction' => $transaction,
+            'checkout_url' => $result['checkout_url'] ?? null,
+        ]);
+    }
+
+    public function recordTransactions(Request $request, int $id)
+    {
+        $record = $this->findPayrollRecord($request, $id);
+        if (!$record) {
+            return response()->json(['data' => []]);
+        }
+
+        return response()->json([
+            'data' => $record->transactions()->latest()->get(),
+        ]);
+    }
+
+    public function stripeWebhook(Request $request)
+    {
+        $mode = $this->payrollPayoutManager->mode();
+        if (!in_array($mode, ['stripe_test', 'stripe_live'], true)) {
+            return response()->json(['message' => 'Stripe webhook ignored in current payroll mode.'], 400);
+        }
+
+        $payload = $request->getContent();
+        $signature = (string) $request->header('Stripe-Signature', '');
+        if (!$this->stripePayrollPayoutService->verifyWebhookSignature($payload, $signature)) {
+            return response()->json(['message' => 'Invalid webhook signature'], 400);
+        }
+
+        $event = json_decode($payload, true);
+        if (!is_array($event)) {
+            return response()->json(['message' => 'Invalid payload'], 400);
+        }
+
+        $type = (string) ($event['type'] ?? '');
+        $eventData = $event['data']['object'] ?? null;
+        if (!is_array($eventData)) {
+            return response()->json(['received' => true]);
+        }
+
+        if (!in_array($type, [
+            'payment_intent.succeeded',
+            'payment_intent.processing',
+            'payment_intent.payment_failed',
+            'checkout.session.completed',
+            'checkout.session.expired',
+            'checkout.session.async_payment_failed',
+        ], true)) {
+            return response()->json(['received' => true]);
+        }
+
+        $transaction = null;
+        $mappedStatus = 'pending';
+
+        if (str_starts_with($type, 'payment_intent.')) {
+            $paymentIntentId = (string) ($eventData['id'] ?? '');
+            if ($paymentIntentId === '') {
+                return response()->json(['received' => true]);
+            }
+
+            $transaction = PayrollTransaction::query()
+                ->where('provider', 'stripe')
+                ->where(function ($q) use ($paymentIntentId) {
+                    $q->where('transaction_id', $paymentIntentId)
+                        ->orWhere('raw_response->payment_intent', $paymentIntentId);
+                })
+                ->latest()
+                ->first();
+
+            $mappedStatus = $this->stripePayrollPayoutService->mapStripeStatusToPayoutStatus((string) ($eventData['status'] ?? ''));
+        } elseif (str_starts_with($type, 'checkout.session.')) {
+            $sessionId = (string) ($eventData['id'] ?? '');
+            if ($sessionId === '') {
+                return response()->json(['received' => true]);
+            }
+
+            $transaction = PayrollTransaction::query()
+                ->where('provider', 'stripe')
+                ->where('transaction_id', $sessionId)
+                ->latest()
+                ->first();
+
+            $mappedStatus = match ($type) {
+                'checkout.session.completed' => 'success',
+                'checkout.session.expired', 'checkout.session.async_payment_failed' => 'failed',
+                default => 'pending',
+            };
+        }
+
+        if (!$transaction) {
+            return response()->json(['received' => true]);
+        }
+
+        $wasSuccess = $transaction->status === 'success';
+        $transaction->update([
+            'status' => $mappedStatus,
+            'raw_response' => $event,
+        ]);
+
+        $payroll = Payroll::find($transaction->payroll_id);
+        if ($payroll) {
+            $previousPayrollStatus = $payroll->payout_status;
+            $payroll->payout_status = $mappedStatus;
+            if ($mappedStatus === 'success') {
+                $payroll->payroll_status = 'paid';
+                $payroll->paid_at = now();
+            }
+            $payroll->save();
+
+            if (!$wasSuccess && $previousPayrollStatus !== 'success' && $mappedStatus === 'success') {
+                $this->sendPayrollPaidNotification($payroll->loadMissing('user'));
+            }
+        }
+
+        return response()->json(['received' => true]);
     }
 
     public function structures(Request $request)
@@ -469,8 +925,50 @@ class PayrollController extends Controller
         return $query->first();
     }
 
+    private function findPayrollRecord(Request $request, int $id): ?Payroll
+    {
+        $currentUser = $request->user();
+        if (!$currentUser || !$currentUser->organization_id) {
+            return null;
+        }
+        if (!$this->canManagePayroll($currentUser)) {
+            return null;
+        }
+
+        return Payroll::where('organization_id', $currentUser->organization_id)
+            ->where('id', $id)
+            ->first();
+    }
+
     private function canManagePayroll(User $user): bool
     {
         return in_array($user->role, ['admin', 'manager'], true);
+    }
+
+    private function sendPayrollPaidNotification(Payroll $payroll, ?int $senderId = null): void
+    {
+        if (!$payroll->organization_id || !$payroll->user_id) {
+            return;
+        }
+
+        $currency = (string) config('payroll.default_currency', 'INR');
+        $amount = round((float) $payroll->net_salary, 2);
+        $period = (string) $payroll->payroll_month;
+
+        $this->notificationService->sendToUsers(
+            organizationId: (int) $payroll->organization_id,
+            userIds: collect([(int) $payroll->user_id]),
+            senderId: $senderId,
+            type: 'salary_credited',
+            title: 'Salary Credited',
+            message: "Your salary of {$currency} {$amount} was paid today for {$period}.",
+            meta: [
+                'payroll_id' => $payroll->id,
+                'period_month' => $period,
+                'currency' => $currency,
+                'amount' => $amount,
+                'paid_at' => optional($payroll->paid_at)->toIso8601String(),
+            ]
+        );
     }
 }

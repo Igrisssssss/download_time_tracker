@@ -22,6 +22,8 @@ import type {
   PayrollStructure,
   Payslip,
   PayrollComponent,
+  PayrollRecord,
+  PayrollTransaction,
 } from '@/types';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
@@ -520,6 +522,58 @@ export const chatApi = {
 };
 
 export const payrollApi = {
+  getEmployees: () =>
+    api.get<{ data: Array<{ id: number; name: string; email: string; role: string }> }>('/payroll/employees'),
+
+  getRecords: (params?: {
+    user_id?: number;
+    payroll_month?: string;
+    payroll_status?: 'draft' | 'processed' | 'paid';
+    payout_status?: 'pending' | 'success' | 'failed';
+    payout_method?: 'mock' | 'stripe';
+  }) =>
+    api.get<{ data: PayrollRecord[]; mode: 'mock' | 'stripe_test' | 'stripe_live' }>('/payroll/records', { params }),
+
+  generateRecords: (data: {
+    payroll_month: string;
+    user_id?: number;
+    allow_overwrite?: boolean;
+    payout_method?: 'mock' | 'stripe';
+  }) =>
+    api.post<{
+      message: string;
+      generated_count: number;
+      skipped_count: number;
+      generated: PayrollRecord[];
+      skipped: Array<{ employee_id: number; reason: string }>;
+    }>('/payroll/records/generate', data),
+
+  getRecord: (id: number) =>
+    api.get<PayrollRecord>(`/payroll/records/${id}`),
+
+  updateRecord: (id: number, data: {
+    basic_salary?: number;
+    allowances?: number;
+    deductions?: number;
+    bonus?: number;
+    tax?: number;
+    payroll_status?: 'draft' | 'processed' | 'paid';
+    payout_method?: 'mock' | 'stripe';
+  }) =>
+    api.patch<PayrollRecord>(`/payroll/records/${id}`, data),
+
+  updateRecordStatus: (id: number, payroll_status: 'draft' | 'processed' | 'paid') =>
+    api.post<PayrollRecord>(`/payroll/records/${id}/status`, { payroll_status }),
+
+  payoutRecord: (id: number, data?: {
+    payout_method?: 'mock' | 'stripe';
+    simulate_status?: 'success' | 'failed' | 'pending';
+  }) =>
+    api.post<{ mode: 'mock' | 'stripe_test' | 'stripe_live'; payroll: PayrollRecord; transaction: PayrollTransaction; checkout_url?: string | null }>(`/payroll/records/${id}/payout`, data || {}),
+
+  getRecordTransactions: (id: number) =>
+    api.get<{ data: PayrollTransaction[] }>(`/payroll/records/${id}/transactions`),
+
   getStructures: (params?: { user_id?: number }) =>
     api.get<{ users: Array<{ id: number; name: string; email: string; role: string }>; structures: PayrollStructure[] }>('/payroll/structures', { params }),
 

@@ -49,6 +49,11 @@ class User extends Authenticatable
         return $this->hasMany(Payslip::class);
     }
 
+    public function payrolls()
+    {
+        return $this->hasMany(Payroll::class);
+    }
+
     public function sentChatMessages()
     {
         return $this->hasMany(ChatMessage::class, 'sender_id');
