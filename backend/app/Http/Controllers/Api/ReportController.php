@@ -836,6 +836,7 @@ class ReportController extends Controller
             ->values();
 
         $employeeScores = collect(array_values($perUserScore))
+            ->filter(fn (array $row) => strtolower((string) ($row['user']['role'] ?? '')) === 'employee')
             ->map(function (array $row) {
                 $total = max(1, (int) $row['total_duration']);
                 $row['productive_share'] = (float) round(($row['productive_duration'] / $total) * 100, 2);
@@ -865,6 +866,66 @@ class ReportController extends Controller
                 ->pluck('user_id')
                 ->map(fn ($id) => (int) $id)
                 ->unique();
+
+        $todayDate = now()->toDateString();
+        $onLeaveUserIds = $analyticsUserIds->isEmpty()
+            ? collect()
+            : LeaveRequest::query()
+                ->whereIn('user_id', $analyticsUserIds)
+                ->where('status', 'approved')
+                ->whereDate('start_date', '<=', $todayDate)
+                ->whereDate('end_date', '>=', $todayDate)
+                ->where(function ($query) {
+                    $query->whereNull('revoke_status')
+                        ->orWhere('revoke_status', '!=', 'approved');
+                })
+                ->pluck('user_id')
+                ->map(fn ($id) => (int) $id)
+                ->unique();
+
+        $userScoreById = collect($perUserScore);
+        $orgGroups = ReportGroup::with(['users:id,name,email,role'])
+            ->where('organization_id', $currentUser->organization_id)
+            ->orderBy('name')
+            ->get();
+
+        $teamEfficiency = $orgGroups->map(function (ReportGroup $group) use ($userScoreById, $activeTimeEntryUserIds, $onLeaveUserIds) {
+            $memberIds = collect($group->users ?? [])
+                ->filter(fn ($u) => strtolower((string) ($u->role ?? '')) === 'employee')
+                ->pluck('id')
+                ->map(fn ($id) => (int) $id)
+                ->values();
+
+            $memberScores = $memberIds
+                ->map(fn ($id) => $userScoreById->get($id))
+                ->filter()
+                ->values();
+
+            $productive = (int) $memberScores->sum(fn ($row) => (int) ($row['productive_duration'] ?? 0));
+            $unproductive = (int) $memberScores->sum(fn ($row) => (int) ($row['unproductive_duration'] ?? 0));
+            $neutral = (int) $memberScores->sum(fn ($row) => (int) ($row['neutral_duration'] ?? 0));
+            $total = $productive + $unproductive + $neutral;
+            $score = $total > 0 ? (float) round(($productive / $total) * 100, 2) : 0.0;
+
+            return [
+                'group' => [
+                    'id' => (int) $group->id,
+                    'name' => $group->name,
+                ],
+                'members_count' => $memberIds->count(),
+                'active_members_count' => $memberIds->filter(fn ($id) => $activeTimeEntryUserIds->contains($id))->count(),
+                'on_leave_members_count' => $memberIds->filter(fn ($id) => $onLeaveUserIds->contains($id))->count(),
+                'productive_duration' => $productive,
+                'unproductive_duration' => $unproductive,
+                'neutral_duration' => $neutral,
+                'total_duration' => $total,
+                'efficiency_score' => $score,
+            ];
+        })->values();
+
+        $teamEfficiencyRanked = $teamEfficiency
+            ->sortByDesc('efficiency_score')
+            ->values();
 
         $latestRecentActivities = $analyticsUserIds->isEmpty()
             ? collect()
@@ -905,6 +966,19 @@ class ReportController extends Controller
             ];
         })->values();
 
+        $liveMonitoringRows = $liveMonitoringRows->map(function (array $row) use ($onLeaveUserIds) {
+            $isOnLeave = $onLeaveUserIds->contains((int) ($row['user']['id'] ?? 0));
+            $row['is_on_leave'] = $isOnLeave;
+            $row['work_status'] = $isOnLeave
+                ? 'on_leave'
+                : ((bool) ($row['is_working'] ?? false) ? 'active' : 'inactive');
+            return $row;
+        })->values();
+
+        $employeeLiveRows = $liveMonitoringRows
+            ->filter(fn (array $row) => strtolower((string) ($row['user']['role'] ?? '')) === 'employee')
+            ->values();
+
         $selectedUserLive = $liveMonitoringRows->first(fn ($row) => (int) ($row['user']['id'] ?? 0) === (int) $selectedUser->id);
 
         return response()->json([
@@ -938,13 +1012,21 @@ class ReportController extends Controller
             'employee_rankings' => [
                 'most_productive' => $mostProductiveEmployee,
                 'most_unproductive' => $mostUnproductiveEmployee,
-                'by_productive_duration' => $employeeScores->sortByDesc('productive_duration')->take(10)->values(),
-                'by_unproductive_duration' => $employeeScores->sortByDesc('unproductive_duration')->take(10)->values(),
+                'by_productive_duration' => $employeeScores->sortByDesc('productive_duration')->values(),
+                'by_unproductive_duration' => $employeeScores->sortByDesc('unproductive_duration')->values(),
+            ],
+            'team_rankings' => [
+                'by_efficiency' => $teamEfficiencyRanked,
+                'top_productive' => $teamEfficiencyRanked->first(),
+                'least_productive' => $teamEfficiencyRanked->sortBy('efficiency_score')->first(),
             ],
             'live_monitoring' => [
                 'selected_user' => $selectedUserLive,
                 'working_now' => $liveMonitoringRows->where('is_working', true)->values(),
                 'all_users' => $liveMonitoringRows,
+                'employees_active' => $employeeLiveRows->where('work_status', 'active')->values(),
+                'employees_inactive' => $employeeLiveRows->where('work_status', 'inactive')->values(),
+                'employees_on_leave' => $employeeLiveRows->where('work_status', 'on_leave')->values(),
             ],
             'recent_screenshots' => $recentScreenshots,
         ]);

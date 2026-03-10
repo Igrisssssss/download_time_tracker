@@ -6,6 +6,24 @@
 - **Core Functionality**: Employee time tracking, productivity monitoring, invoicing, and reporting SaaS product similar to Time Doctor
 - **Target Users**: Companies of all sizes, freelancers, remote teams
 
+## Recent Product Updates (March 10, 2026)
+- **Attendance navigation split**:
+  - Desktop `Edit Time` now opens a dedicated time-edit/overtime screen only.
+  - Full attendance calendar remains on `Attendance` screen.
+- **Monitoring upgraded**:
+  - Added productive/unproductive classification for website/software usage.
+  - Added organization-level tool summaries and employee productivity rankings.
+  - Added live monitoring payload + UI for current active tool/status per user.
+  - Improved desktop tracker frequency and first-tick behavior for faster visibility.
+- **Tracker context improvements**:
+  - Activity now captures richer active window context (app/title/url where available).
+  - Idle events now include context name to support better classification visibility.
+  - Idle duration is capped per interval to avoid inflated idle totals.
+- **Admin UX consolidation**:
+  - Team creation/invite flow removed from Team page.
+  - Team-style time/active status system moved into `User Management`.
+  - Sidebar Team item removed; `/team` now redirects to `/user-management`.
+
 ---
 
 ## Technology Stack

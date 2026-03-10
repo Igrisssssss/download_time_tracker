@@ -66,8 +66,16 @@ export default function Monitoring() {
   const organizationTools = data?.organization_tools || { productive: [], unproductive: [] };
   const organizationSummary = data?.organization_summary || null;
   const employeeRankings = data?.employee_rankings || null;
+  const teamRankings = data?.team_rankings || { by_efficiency: [], top_productive: null, least_productive: null };
   const liveMonitoring = data?.live_monitoring || { selected_user: null, working_now: [], all_users: [] };
   const selectedUserLive = liveMonitoring?.selected_user;
+  const employeesActive = liveMonitoring?.employees_active || [];
+  const employeesInactive = liveMonitoring?.employees_inactive || [];
+  const employeesOnLeave = liveMonitoring?.employees_on_leave || [];
+  const productiveEmployeeRanking = employeeRankings?.by_productive_duration || [];
+  const maxProductiveDuration = Math.max(1, ...productiveEmployeeRanking.map((item: any) => Number(item?.productive_duration || 0)));
+  const teamEfficiencyRanking = teamRankings?.by_efficiency || [];
+  const maxTeamEfficiency = Math.max(1, ...teamEfficiencyRanking.map((item: any) => Number(item?.efficiency_score || 0)));
   const analyticsUsersCount = Number(data?.analytics_users_count || 0);
   const totalActivityDuration = activityBreakdown.reduce((sum: number, item: any) => sum + Number(item.total_duration || 0), 0);
 
@@ -221,26 +229,58 @@ export default function Monitoring() {
 
             <div className="bg-white rounded-xl border border-gray-200 p-4">
               <div className="flex items-center justify-between">
-                <h2 className="font-semibold text-gray-900">Live Working Now (Team)</h2>
-                <p className="text-xs text-gray-500">{(liveMonitoring?.working_now || []).length} active</p>
+                <h2 className="font-semibold text-gray-900">Employee Status (Live)</h2>
+                <p className="text-xs text-gray-500">{employeesActive.length + employeesInactive.length + employeesOnLeave.length} employees</p>
               </div>
-              {(liveMonitoring?.working_now || []).length === 0 ? (
-                <p className="text-sm text-gray-500 mt-3">No users currently active.</p>
-              ) : (
-                <div className="mt-3 space-y-2 max-h-56 overflow-auto">
-                  {(liveMonitoring?.working_now || []).map((item: any) => (
-                    <div key={item.user?.id} className="rounded-lg border border-gray-100 p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium text-gray-900">{item.user?.name}</p>
-                        <span className={`text-xs px-2 py-1 rounded-full ${item.classification === 'unproductive' ? 'bg-red-100 text-red-700' : item.classification === 'productive' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>
-                          {item.classification}
-                        </span>
-                      </div>
-                      <p className="text-xs text-gray-600 mt-1">{item.current_tool || 'Unknown tool'}</p>
-                    </div>
-                  ))}
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-green-800">Active</p>
+                    <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">{employeesActive.length}</span>
+                  </div>
+                  <div className="mt-2 space-y-1 max-h-44 overflow-auto">
+                    {employeesActive.length === 0 ? (
+                      <p className="text-xs text-green-700">No active employees.</p>
+                    ) : employeesActive.map((item: any) => (
+                      <p key={`active-${item.user?.id}`} className="text-xs text-green-900 truncate" title={`${item.user?.name || ''} - ${item.current_tool || 'Unknown tool'}`}>
+                        {item.user?.name}: {item.current_tool || 'Unknown tool'}
+                      </p>
+                    ))}
+                  </div>
                 </div>
-              )}
+
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-gray-800">Inactive</p>
+                    <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">{employeesInactive.length}</span>
+                  </div>
+                  <div className="mt-2 space-y-1 max-h-44 overflow-auto">
+                    {employeesInactive.length === 0 ? (
+                      <p className="text-xs text-gray-600">No inactive employees.</p>
+                    ) : employeesInactive.map((item: any) => (
+                      <p key={`inactive-${item.user?.id}`} className="text-xs text-gray-800 truncate" title={`${item.user?.name || ''} - ${item.current_tool || 'Unknown tool'}`}>
+                        {item.user?.name}: {item.current_tool || 'No recent tool'}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-amber-800">On Leave</p>
+                    <span className="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-700">{employeesOnLeave.length}</span>
+                  </div>
+                  <div className="mt-2 space-y-1 max-h-44 overflow-auto">
+                    {employeesOnLeave.length === 0 ? (
+                      <p className="text-xs text-amber-700">No employees on leave today.</p>
+                    ) : employeesOnLeave.map((item: any) => (
+                      <p key={`leave-${item.user?.id}`} className="text-xs text-amber-900 truncate">
+                        {item.user?.name}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -387,35 +427,78 @@ export default function Monitoring() {
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="bg-white rounded-xl border border-gray-200 p-4">
-              <h2 className="font-semibold text-gray-900 mb-3">Top Employee Rankings</h2>
-              <div className="space-y-3">
-                <div className="rounded-lg border border-gray-100 p-3">
-                  <p className="text-xs uppercase tracking-wide text-gray-500">Most Productive Employee</p>
-                  {employeeRankings?.most_productive ? (
-                    <>
-                      <p className="text-sm font-semibold text-gray-900 mt-1">{employeeRankings.most_productive.user?.name}</p>
-                      <p className="text-xs text-gray-600">{employeeRankings.most_productive.user?.email}</p>
-                      <p className="text-xs text-green-700 mt-1">Productive: {formatDuration(employeeRankings.most_productive.productive_duration || 0)}</p>
-                    </>
-                  ) : (
-                    <p className="text-sm text-gray-500 mt-1">No data.</p>
-                  )}
+              <h2 className="font-semibold text-gray-900 mb-1">Employee Productivity Ranking</h2>
+              <p className="text-xs text-gray-500 mb-3">Employees only, ordered from most productive to least productive</p>
+              {productiveEmployeeRanking.length === 0 ? (
+                <p className="text-sm text-gray-500">No employee productivity data found.</p>
+              ) : (
+                <div className="border border-gray-100 rounded-lg p-3 space-y-2 max-h-72 overflow-auto">
+                  {productiveEmployeeRanking.map((item: any) => {
+                    const duration = Number(item?.productive_duration || 0);
+                    const widthPercent = Math.max(6, Math.round((duration / maxProductiveDuration) * 100));
+                    return (
+                      <div key={`rank-${item?.user?.id}`} className="space-y-1">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-xs text-gray-700 truncate">{item?.user?.name || 'Unknown'}</p>
+                          <p className="text-xs text-gray-600 shrink-0">{formatDuration(duration)}</p>
+                        </div>
+                        <div className="h-3 w-full bg-gray-100 rounded-md overflow-hidden">
+                          <div
+                            className="h-3 bg-green-500 rounded-md"
+                            style={{ width: `${widthPercent}%` }}
+                            title={`${item?.user?.name || 'Unknown'} - ${formatDuration(duration)}`}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div className="rounded-lg border border-gray-100 p-3">
-                  <p className="text-xs uppercase tracking-wide text-gray-500">Most Unproductive Employee</p>
-                  {employeeRankings?.most_unproductive ? (
-                    <>
-                      <p className="text-sm font-semibold text-gray-900 mt-1">{employeeRankings.most_unproductive.user?.name}</p>
-                      <p className="text-xs text-gray-600">{employeeRankings.most_unproductive.user?.email}</p>
-                      <p className="text-xs text-red-700 mt-1">Unproductive: {formatDuration(employeeRankings.most_unproductive.unproductive_duration || 0)}</p>
-                    </>
-                  ) : (
-                    <p className="text-sm text-gray-500 mt-1">No data.</p>
-                  )}
-                </div>
-              </div>
+              )}
             </div>
 
+            <div className="bg-white rounded-xl border border-gray-200 p-4">
+              <h2 className="font-semibold text-gray-900 mb-1">Team Productivity Efficiency</h2>
+              <p className="text-xs text-gray-500 mb-3">Higher score means more productive time share</p>
+              {teamEfficiencyRanking.length === 0 ? (
+                <p className="text-sm text-gray-500">No team/group data found.</p>
+              ) : (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="rounded-lg border border-green-200 bg-green-50 p-3">
+                      <p className="text-xs uppercase tracking-wide text-green-700">Top Team</p>
+                      <p className="text-sm font-semibold text-gray-900 mt-1">{teamRankings?.top_productive?.group?.name || 'N/A'}</p>
+                      <p className="text-xs text-green-800 mt-1">Efficiency: {Number(teamRankings?.top_productive?.efficiency_score || 0).toFixed(2)}%</p>
+                    </div>
+                    <div className="rounded-lg border border-red-200 bg-red-50 p-3">
+                      <p className="text-xs uppercase tracking-wide text-red-700">Least Productive Team</p>
+                      <p className="text-sm font-semibold text-gray-900 mt-1">{teamRankings?.least_productive?.group?.name || 'N/A'}</p>
+                      <p className="text-xs text-red-800 mt-1">Efficiency: {Number(teamRankings?.least_productive?.efficiency_score || 0).toFixed(2)}%</p>
+                    </div>
+                  </div>
+
+                  <div className="border border-gray-100 rounded-lg p-3 space-y-2 max-h-48 overflow-auto">
+                    {teamEfficiencyRanking.map((item: any) => {
+                      const score = Number(item?.efficiency_score || 0);
+                      const widthPercent = Math.max(6, Math.round((score / maxTeamEfficiency) * 100));
+                      return (
+                        <div key={`team-eff-${item?.group?.id}`} className="space-y-1">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-xs text-gray-700 truncate">{item?.group?.name || 'Unnamed Team'}</p>
+                            <p className="text-xs text-gray-600 shrink-0">{score.toFixed(2)}%</p>
+                          </div>
+                          <div className="h-3 w-full bg-gray-100 rounded-md overflow-hidden">
+                            <div className="h-3 bg-blue-500 rounded-md" style={{ width: `${widthPercent}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="bg-white rounded-xl border border-gray-200 p-4">
               <h2 className="font-semibold text-gray-900 mb-3">Recent Screenshots</h2>
               <div className="grid grid-cols-2 gap-2 max-h-80 overflow-auto">
