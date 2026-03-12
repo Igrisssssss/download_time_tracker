@@ -17,6 +17,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import AdaptiveSurface from '@/components/ui/AdaptiveSurface';
+import BrandLogo from '@/components/branding/BrandLogo';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 const API_BASE_URL = API_URL.replace(/\/api\/?$/, '');
@@ -74,9 +75,9 @@ export default function Login() {
                     <ArrowLeft className="h-4 w-4" />
                   </Link>
                 </div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.32em] text-sky-700">CareVance HRMS</p>
+                <BrandLogo variant="full" size="sm" className="mb-5 max-w-[16rem]" />
                 <h1 className="mt-3 text-4xl font-semibold tracking-[-0.06em] text-slate-950 sm:text-[3.2rem] sm:leading-[0.95]">
-                  Sign in to TimeTrack
+                  Sign in to CareVance
                 </h1>
                 <p className="mt-4 text-base leading-8 text-slate-600">
                   Welcome back. Open the dashboard, monitoring, attendance, reporting, payroll, and internal operations modules from one place.

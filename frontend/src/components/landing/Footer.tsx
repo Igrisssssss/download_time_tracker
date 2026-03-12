@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
-import { Github, Linkedin, Twitter, Clock3 } from 'lucide-react';
+import { Github, Linkedin, Twitter } from 'lucide-react';
 import AdaptiveSurface from '@/components/ui/AdaptiveSurface';
+import BrandLogo from '@/components/branding/BrandLogo';
 
 const footerGroups = [
   {
@@ -27,17 +28,11 @@ export default function Footer() {
       >
         <div className="grid gap-10 lg:grid-cols-[1.1fr_0.9fr]">
           <div>
-            <Link to="/" className="flex items-center gap-3 contrast-text-primary">
-              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#0f172a,#0ea5e9)] text-white">
-                <Clock3 className="h-5 w-5" />
-              </div>
-              <div>
-                <p className="text-lg font-semibold tracking-tight">TimeTrack</p>
-                <p className="text-sm contrast-text-muted">CareVance HRMS</p>
-              </div>
+            <Link to="/" className="inline-flex w-full max-w-[16rem] items-center">
+              <BrandLogo variant="full" size="sm" className="max-w-full" />
             </Link>
             <p className="mt-6 max-w-md text-sm leading-7 contrast-text-secondary">
-              TimeTrack helps teams monitor work activity, manage attendance, review reports, run payroll workflows, and coordinate daily operations from one connected HRMS workspace.
+              CareVance helps teams monitor work activity, manage attendance, review reports, run payroll workflows, and coordinate daily operations from one connected HRMS workspace.
             </p>
             <div className="mt-6 flex items-center gap-3 contrast-text-muted">
               {[Twitter, Linkedin, Github].map((Icon) => (

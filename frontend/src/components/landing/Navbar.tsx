@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Download, Menu, X, Clock3 } from 'lucide-react';
+import { Download, Menu, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import AdaptiveSurface from '@/components/ui/AdaptiveSurface';
-import AutoContrastText from '@/components/ui/AutoContrastText';
+import BrandLogo from '@/components/branding/BrandLogo';
 
 const navItems = [
   { label: 'Product', href: '#product' },
@@ -51,7 +51,7 @@ export default function Navbar() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  const handleLogoClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
+  const handleBrandClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
     setIsOpen(false);
 
     if (location.pathname === '/') {
@@ -76,18 +76,16 @@ export default function Navbar() {
         backgroundColor={isScrolled ? 'rgba(255,255,255,0.98)' : 'rgba(255,255,255,0.96)'}
       >
         <div className="flex items-center justify-between px-4 py-3 sm:px-5 sm:py-4 lg:px-7">
-          <Link to="/" onClick={handleLogoClick} className="flex min-w-0 items-center gap-3 contrast-text-primary">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[18px] bg-[linear-gradient(135deg,#020617_0%,#0f172a_30%,#0284c7_75%,#67e8f9_100%)] shadow-[0_18px_35px_-14px_rgba(14,165,233,0.8)] sm:h-11 sm:w-11">
-              <Clock3 className="h-5 w-5 text-white" />
-            </div>
-            <div className="min-w-0">
-              <AutoContrastText as="p" priority="accent" className="truncate text-[10px] font-semibold uppercase tracking-[0.28em] sm:text-[11px] sm:tracking-[0.32em]">
-                CareVance HRMS
-              </AutoContrastText>
-              <AutoContrastText as="p" className="text-base font-semibold tracking-[-0.04em] sm:text-lg">
-                TimeTrack
-              </AutoContrastText>
-            </div>
+          <Link
+            to="/"
+            onClick={handleBrandClick}
+            className="flex min-w-0 items-center"
+          >
+            <BrandLogo
+              variant="full"
+              size="sm"
+              className="max-w-[13rem] sm:max-w-[15rem] lg:max-w-[18rem]"
+            />
           </Link>
 
           <nav className="hidden items-center gap-8 lg:flex">
