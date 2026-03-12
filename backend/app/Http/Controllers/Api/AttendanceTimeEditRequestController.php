@@ -7,13 +7,16 @@ use App\Models\AttendanceRecord;
 use App\Models\AttendanceTimeEditRequest;
 use App\Models\User;
 use App\Services\AppNotificationService;
+use App\Services\Audit\AuditLogService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 
 class AttendanceTimeEditRequestController extends Controller
 {
-    public function __construct(private readonly AppNotificationService $notificationService)
-    {
+    public function __construct(
+        private readonly AppNotificationService $notificationService,
+        private readonly AuditLogService $auditLogService,
+    ) {
     }
 
     public function index(Request $request)
@@ -125,6 +128,19 @@ class AttendanceTimeEditRequestController extends Controller
             ]
         );
 
+        $this->auditLogService->log(
+            action: 'attendance.time_edit_requested',
+            actor: $currentUser,
+            target: $created,
+            metadata: [
+                'attendance_date' => $date,
+                'extra_minutes' => (int) $request->extra_minutes,
+                'worked_seconds' => $workedSeconds,
+                'overtime_seconds' => $overtimeSeconds,
+            ],
+            request: $request
+        );
+
         return response()->json([
             'message' => 'Time edit request submitted.',
             'data' => $created->load(['user:id,name,email,role', 'reviewer:id,name,email']),
@@ -165,6 +181,18 @@ class AttendanceTimeEditRequestController extends Controller
         $record->manual_adjustment_seconds = (int) ($record->manual_adjustment_seconds ?? 0) + (int) $item->extra_seconds;
         $record->save();
 
+        $this->auditLogService->log(
+            action: 'attendance.time_edit_approved',
+            actor: $currentUser,
+            target: $item,
+            metadata: [
+                'employee_id' => $item->user_id,
+                'attendance_date' => $item->attendance_date,
+                'extra_seconds' => (int) $item->extra_seconds,
+            ],
+            request: $request
+        );
+
         return response()->json([
             'message' => 'Time edit request approved and applied.',
             'data' => $item->fresh()->load(['user:id,name,email,role', 'reviewer:id,name,email']),
@@ -196,6 +224,18 @@ class AttendanceTimeEditRequestController extends Controller
             'reviewed_at' => now(),
             'review_note' => $request->review_note,
         ]);
+
+        $this->auditLogService->log(
+            action: 'attendance.time_edit_rejected',
+            actor: $currentUser,
+            target: $item,
+            metadata: [
+                'employee_id' => $item->user_id,
+                'attendance_date' => $item->attendance_date,
+                'extra_seconds' => (int) $item->extra_seconds,
+            ],
+            request: $request
+        );
 
         return response()->json([
             'message' => 'Time edit request rejected.',

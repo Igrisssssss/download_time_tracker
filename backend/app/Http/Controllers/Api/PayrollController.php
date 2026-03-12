@@ -3,6 +3,16 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Api\Payroll\GeneratePayrollRecordsRequest;
+use App\Http\Requests\Api\Payroll\GeneratePayslipRequest;
+use App\Http\Requests\Api\Payroll\PayPayslipsRequest;
+use App\Http\Requests\Api\Payroll\PayrollRecordsIndexRequest;
+use App\Http\Requests\Api\Payroll\PayoutPayrollRecordRequest;
+use App\Http\Requests\Api\Payroll\PayslipsIndexRequest;
+use App\Http\Requests\Api\Payroll\SavePayrollStructureRequest;
+use App\Http\Requests\Api\Payroll\SyncStripeCheckoutRequest;
+use App\Http\Requests\Api\Payroll\UpdatePayrollRecordRequest;
+use App\Http\Requests\Api\Payroll\UpdatePayrollRecordStatusRequest;
 use App\Models\PayrollAllowance;
 use App\Models\PayrollDeduction;
 use App\Models\Payroll;
@@ -11,7 +21,9 @@ use App\Models\PayrollStructure;
 use App\Models\Payslip;
 use App\Models\User;
 use App\Services\AppNotificationService;
+use App\Services\Audit\AuditLogService;
 use App\Services\Payroll\PayrollCalculatorService;
+use App\Services\Payroll\PayrollDomainService;
 use App\Services\Payroll\PayrollPayoutManager;
 use App\Services\Payroll\StripePayrollPayoutService;
 use Carbon\Carbon;
@@ -26,7 +38,9 @@ class PayrollController extends Controller
 {
     public function __construct(
         private readonly AppNotificationService $notificationService,
+        private readonly AuditLogService $auditLogService,
         private readonly PayrollCalculatorService $payrollCalculatorService,
+        private readonly PayrollDomainService $payrollDomainService,
         private readonly PayrollPayoutManager $payrollPayoutManager,
         private readonly StripePayrollPayoutService $stripePayrollPayoutService,
     ) {
@@ -38,7 +52,7 @@ class PayrollController extends Controller
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['data' => []]);
         }
-        if (!$this->canManagePayroll($currentUser)) {
+        if (!$this->payrollDomainService->canManagePayroll($currentUser)) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
@@ -50,21 +64,13 @@ class PayrollController extends Controller
         return response()->json(['data' => $users]);
     }
 
-    public function records(Request $request)
+    public function records(PayrollRecordsIndexRequest $request)
     {
-        $request->validate([
-            'user_id' => 'nullable|integer',
-            'payroll_month' => ['nullable', 'regex:/^\d{4}\-\d{2}$/'],
-            'payroll_status' => 'nullable|in:draft,processed,paid',
-            'payout_status' => 'nullable|in:pending,success,failed',
-            'payout_method' => 'nullable|in:mock,stripe',
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['data' => [], 'mode' => $this->payrollPayoutManager->mode()]);
         }
-        if (!$this->canManagePayroll($currentUser)) {
+        if (!$this->payrollDomainService->canManagePayroll($currentUser)) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
@@ -95,20 +101,13 @@ class PayrollController extends Controller
         ]);
     }
 
-    public function generateRecords(Request $request)
+    public function generateRecords(GeneratePayrollRecordsRequest $request)
     {
-        $request->validate([
-            'payroll_month' => ['required', 'regex:/^\d{4}\-\d{2}$/'],
-            'user_id' => 'nullable|integer',
-            'allow_overwrite' => 'nullable|boolean',
-            'payout_method' => 'nullable|in:mock,stripe',
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['message' => 'Organization is required.'], 422);
         }
-        if (!$this->canManagePayroll($currentUser)) {
+        if (!$this->payrollDomainService->canManagePayroll($currentUser)) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
@@ -137,7 +136,7 @@ class PayrollController extends Controller
             &$skipped
         ) {
             foreach ($employees as $employee) {
-                $structure = $this->resolvePayrollStructure(
+                $structure = $this->payrollDomainService->resolvePayrollStructure(
                     (int) $currentUser->organization_id,
                     (int) $employee->id,
                     $periodStart,
@@ -158,8 +157,8 @@ class PayrollController extends Controller
                 }
 
                 if ($structure) {
-                    [, $allowanceTotal] = $this->computeComponents($structure->allowances->toArray(), (float) $structure->basic_salary);
-                    [, $deductionTotal] = $this->computeComponents($structure->deductions->toArray(), (float) $structure->basic_salary);
+                    [, $allowanceTotal] = $this->payrollDomainService->computeComponents($structure->allowances->toArray(), (float) $structure->basic_salary);
+                    [, $deductionTotal] = $this->payrollDomainService->computeComponents($structure->deductions->toArray(), (float) $structure->basic_salary);
                     $basicSalary = round((float) $structure->basic_salary, 2);
                     $allowances = round((float) $allowanceTotal, 2);
                     $deductions = round((float) $deductionTotal, 2);
@@ -216,6 +215,20 @@ class PayrollController extends Controller
             }
         });
 
+        $this->auditLogService->log(
+            action: 'payroll.generated',
+            actor: $currentUser,
+            target: 'PayrollBatch',
+            metadata: [
+                'payroll_month' => $request->payroll_month,
+                'generated_count' => count($generated),
+                'skipped_count' => count($skipped),
+                'employee_ids' => collect($generated)->pluck('user_id')->values()->all(),
+                'allow_overwrite' => $allowOverwrite,
+            ],
+            request: $request
+        );
+
         return response()->json([
             'message' => 'Payroll generation completed.',
             'generated_count' => count($generated),
@@ -227,7 +240,7 @@ class PayrollController extends Controller
 
     public function showRecord(Request $request, int $id)
     {
-        $record = $this->findPayrollRecord($request, $id);
+        $record = $this->payrollDomainService->findPayrollRecord($request, $id);
         if (!$record) {
             return response()->json(['message' => 'Payroll record not found'], 404);
         }
@@ -235,19 +248,9 @@ class PayrollController extends Controller
         return response()->json($record->load(['user', 'generatedBy', 'updatedBy', 'transactions']));
     }
 
-    public function updateRecord(Request $request, int $id)
+    public function updateRecord(UpdatePayrollRecordRequest $request, int $id)
     {
-        $request->validate([
-            'basic_salary' => 'nullable|numeric|min:0',
-            'allowances' => 'nullable|numeric|min:0',
-            'deductions' => 'nullable|numeric|min:0',
-            'bonus' => 'nullable|numeric|min:0',
-            'tax' => 'nullable|numeric|min:0',
-            'payroll_status' => 'nullable|in:draft,processed,paid',
-            'payout_method' => 'nullable|in:mock,stripe',
-        ]);
-
-        $record = $this->findPayrollRecord($request, $id);
+        $record = $this->payrollDomainService->findPayrollRecord($request, $id);
         if (!$record) {
             return response()->json(['message' => 'Payroll record not found'], 404);
         }
@@ -257,6 +260,16 @@ class PayrollController extends Controller
         }
 
         $currentUser = $request->user();
+        $before = $record->only([
+            'basic_salary',
+            'allowances',
+            'deductions',
+            'bonus',
+            'tax',
+            'net_salary',
+            'payroll_status',
+            'payout_method',
+        ]);
         $record->fill($request->only(['basic_salary', 'allowances', 'deductions', 'bonus', 'tax', 'payroll_status', 'payout_method']));
         $record->net_salary = $this->payrollCalculatorService->calculateNetSalary(
             (float) $record->basic_salary,
@@ -268,16 +281,34 @@ class PayrollController extends Controller
         $record->updated_by = $currentUser?->id;
         $record->save();
 
+        $this->auditLogService->log(
+            action: 'payroll.updated',
+            actor: $currentUser,
+            target: $record,
+            metadata: [
+                'user_id' => $record->user_id,
+                'payroll_month' => $record->payroll_month,
+                'before' => $before,
+                'after' => $record->only([
+                    'basic_salary',
+                    'allowances',
+                    'deductions',
+                    'bonus',
+                    'tax',
+                    'net_salary',
+                    'payroll_status',
+                    'payout_method',
+                ]),
+            ],
+            request: $request
+        );
+
         return response()->json($record->fresh()->load(['user', 'generatedBy', 'updatedBy']));
     }
 
-    public function updateRecordStatus(Request $request, int $id)
+    public function updateRecordStatus(UpdatePayrollRecordStatusRequest $request, int $id)
     {
-        $request->validate([
-            'payroll_status' => 'required|in:draft,processed,paid',
-        ]);
-
-        $record = $this->findPayrollRecord($request, $id);
+        $record = $this->payrollDomainService->findPayrollRecord($request, $id);
         if (!$record) {
             return response()->json(['message' => 'Payroll record not found'], 404);
         }
@@ -293,17 +324,25 @@ class PayrollController extends Controller
         $record->updated_by = $request->user()?->id;
         $record->save();
 
+        $this->auditLogService->log(
+            action: $nextStatus === 'paid' ? 'payroll.marked_paid' : 'payroll.status_updated',
+            actor: $request->user(),
+            target: $record,
+            metadata: [
+                'user_id' => $record->user_id,
+                'payroll_month' => $record->payroll_month,
+                'payroll_status' => $record->payroll_status,
+                'payout_status' => $record->payout_status,
+            ],
+            request: $request
+        );
+
         return response()->json($record->fresh());
     }
 
-    public function payoutRecord(Request $request, int $id)
+    public function payoutRecord(PayoutPayrollRecordRequest $request, int $id)
     {
-        $request->validate([
-            'payout_method' => 'nullable|in:mock,stripe',
-            'simulate_status' => 'nullable|in:success,failed,pending',
-        ]);
-
-        $record = $this->findPayrollRecord($request, $id);
+        $record = $this->payrollDomainService->findPayrollRecord($request, $id);
         if (!$record) {
             return response()->json(['message' => 'Payroll record not found'], 404);
         }
@@ -350,12 +389,27 @@ class PayrollController extends Controller
         if ($result['status'] === 'success') {
             $record->payroll_status = 'paid';
             $record->paid_at = now();
-            $this->sendPayrollPaidNotification($record->fresh('user'), $currentUser?->id);
+            $this->payrollDomainService->sendPayrollPaidNotification($record->fresh('user'), $currentUser?->id);
         } elseif ($record->payroll_status === 'draft') {
             $record->payroll_status = 'processed';
             $record->processed_at = now();
         }
         $record->save();
+
+        $this->auditLogService->log(
+            action: $result['status'] === 'success' ? 'payroll.marked_paid' : 'payroll.payout_processed',
+            actor: $currentUser,
+            target: $record,
+            metadata: [
+                'user_id' => $record->user_id,
+                'payroll_month' => $record->payroll_month,
+                'provider' => $result['provider'],
+                'payout_method' => $record->payout_method,
+                'payout_status' => $result['status'],
+                'transaction_id' => $result['transaction_id'] ?: null,
+            ],
+            request: $request
+        );
 
         return response()->json([
             'mode' => $this->payrollPayoutManager->mode(),
@@ -367,7 +421,7 @@ class PayrollController extends Controller
 
     public function recordTransactions(Request $request, int $id)
     {
-        $record = $this->findPayrollRecord($request, $id);
+        $record = $this->payrollDomainService->findPayrollRecord($request, $id);
         if (!$record) {
             return response()->json(['data' => []]);
         }
@@ -377,13 +431,9 @@ class PayrollController extends Controller
         ]);
     }
 
-    public function syncStripeCheckout(Request $request, int $id)
+    public function syncStripeCheckout(SyncStripeCheckoutRequest $request, int $id)
     {
-        $request->validate([
-            'checkout_session_id' => 'required|string',
-        ]);
-
-        $record = $this->findPayrollRecord($request, $id);
+        $record = $this->payrollDomainService->findPayrollRecord($request, $id);
         if (!$record) {
             return response()->json(['message' => 'Payroll record not found'], 404);
         }
@@ -444,8 +494,22 @@ class PayrollController extends Controller
         $record->save();
 
         if ($previousPayoutStatus !== 'success' && $mappedStatus === 'success') {
-            $this->sendPayrollPaidNotification($record->fresh('user'), $request->user()?->id);
+            $this->payrollDomainService->sendPayrollPaidNotification($record->fresh('user'), $request->user()?->id);
         }
+
+        $this->auditLogService->log(
+            action: $mappedStatus === 'success' ? 'payroll.marked_paid' : 'payroll.sync_updated',
+            actor: $request->user(),
+            target: $record,
+            metadata: [
+                'user_id' => $record->user_id,
+                'payroll_month' => $record->payroll_month,
+                'payout_method' => $record->payout_method,
+                'payout_status' => $mappedStatus,
+                'checkout_session_id' => (string) $request->checkout_session_id,
+            ],
+            request: $request
+        );
 
         return response()->json([
             'mode' => $this->payrollPayoutManager->mode(),
@@ -549,7 +613,7 @@ class PayrollController extends Controller
             $payroll->save();
 
             if (!$wasSuccess && $previousPayrollStatus !== 'success' && $mappedStatus === 'success') {
-                $this->sendPayrollPaidNotification($payroll->loadMissing('user'));
+                $this->payrollDomainService->sendPayrollPaidNotification($payroll->loadMissing('user'));
             }
         }
 
@@ -564,7 +628,7 @@ class PayrollController extends Controller
         }
 
         $users = User::where('organization_id', $currentUser->organization_id)
-            ->when(!$this->canManagePayroll($currentUser), fn ($q) => $q->where('id', $currentUser->id))
+            ->when(!$this->payrollDomainService->canManagePayroll($currentUser), fn ($q) => $q->where('id', $currentUser->id))
             ->orderBy('name')
             ->get(['id', 'name', 'email', 'role']);
 
@@ -584,29 +648,14 @@ class PayrollController extends Controller
         ]);
     }
 
-    public function upsertStructure(Request $request)
+    public function upsertStructure(SavePayrollStructureRequest $request)
     {
-        $request->validate([
-            'user_id' => 'required|integer',
-            'basic_salary' => 'required|numeric|min:0',
-            'currency' => 'nullable|in:INR,USD',
-            'effective_from' => 'required|date',
-            'allowances' => 'nullable|array',
-            'allowances.*.name' => 'required_with:allowances|string|max:100',
-            'allowances.*.calculation_type' => 'required_with:allowances|in:fixed,percentage',
-            'allowances.*.amount' => 'required_with:allowances|numeric|min:0',
-            'deductions' => 'nullable|array',
-            'deductions.*.name' => 'required_with:deductions|string|max:100',
-            'deductions.*.calculation_type' => 'required_with:deductions|in:fixed,percentage',
-            'deductions.*.amount' => 'required_with:deductions|numeric|min:0',
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['message' => 'Organization is required.'], 422);
         }
 
-        if (!$this->canManagePayroll($currentUser)) {
+        if (!$this->payrollDomainService->canManagePayroll($currentUser)) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
@@ -659,30 +708,28 @@ class PayrollController extends Controller
             return $structure;
         });
 
+        $this->auditLogService->log(
+            action: 'payroll.structure_created',
+            actor: $currentUser,
+            target: $structure,
+            metadata: [
+                'user_id' => $targetUser->id,
+                'currency' => $structure->currency,
+                'effective_from' => $structure->effective_from,
+            ],
+            request: $request
+        );
+
         return response()->json($structure->load(['allowances', 'deductions', 'user']), 201);
     }
 
-    public function updateStructure(Request $request, int $id)
+    public function updateStructure(SavePayrollStructureRequest $request, int $id)
     {
-        $request->validate([
-            'basic_salary' => 'required|numeric|min:0',
-            'currency' => 'nullable|in:INR,USD',
-            'effective_from' => 'required|date',
-            'allowances' => 'nullable|array',
-            'allowances.*.name' => 'required_with:allowances|string|max:100',
-            'allowances.*.calculation_type' => 'required_with:allowances|in:fixed,percentage',
-            'allowances.*.amount' => 'required_with:allowances|numeric|min:0',
-            'deductions' => 'nullable|array',
-            'deductions.*.name' => 'required_with:deductions|string|max:100',
-            'deductions.*.calculation_type' => 'required_with:deductions|in:fixed,percentage',
-            'deductions.*.amount' => 'required_with:deductions|numeric|min:0',
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['message' => 'Organization is required.'], 422);
         }
-        if (!$this->canManagePayroll($currentUser)) {
+        if (!$this->payrollDomainService->canManagePayroll($currentUser)) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
@@ -719,6 +766,18 @@ class PayrollController extends Controller
             }
         });
 
+        $this->auditLogService->log(
+            action: 'payroll.structure_updated',
+            actor: $currentUser,
+            target: $structure,
+            metadata: [
+                'user_id' => $structure->user_id,
+                'currency' => $structure->currency,
+                'effective_from' => $structure->effective_from,
+            ],
+            request: $request
+        );
+
         return response()->json($structure->fresh()->load(['allowances', 'deductions', 'user']));
     }
 
@@ -728,7 +787,7 @@ class PayrollController extends Controller
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['message' => 'Organization is required.'], 422);
         }
-        if (!$this->canManagePayroll($currentUser)) {
+        if (!$this->payrollDomainService->canManagePayroll($currentUser)) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
@@ -737,18 +796,25 @@ class PayrollController extends Controller
             return response()->json(['message' => 'Payroll structure not found'], 404);
         }
 
+        $this->auditLogService->log(
+            action: 'payroll.structure_deleted',
+            actor: $currentUser,
+            target: $structure,
+            metadata: [
+                'user_id' => $structure->user_id,
+                'currency' => $structure->currency,
+                'effective_from' => $structure->effective_from,
+            ],
+            request: $request
+        );
+
         $structure->delete();
 
         return response()->json(['message' => 'Payroll structure deleted.']);
     }
 
-    public function payslips(Request $request)
+    public function payslips(PayslipsIndexRequest $request)
     {
-        $request->validate([
-            'user_id' => 'nullable|integer',
-            'period_month' => ['nullable', 'regex:/^\d{4}\-\d{2}$/'],
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['data' => []]);
@@ -765,27 +831,21 @@ class PayrollController extends Controller
 
         if ($request->filled('user_id')) {
             $query->where('user_id', (int) $request->user_id);
-        } elseif (!$this->canManagePayroll($currentUser)) {
+        } elseif (!$this->payrollDomainService->canManagePayroll($currentUser)) {
             $query->where('user_id', $currentUser->id);
         }
 
         return response()->json(['data' => $query->get()]);
     }
 
-    public function generatePayslip(Request $request)
+    public function generatePayslip(GeneratePayslipRequest $request)
     {
-        $request->validate([
-            'user_id' => 'required|integer',
-            'period_month' => ['required', 'regex:/^\d{4}\-\d{2}$/'],
-            'payroll_structure_id' => 'nullable|integer',
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['message' => 'Organization is required.'], 422);
         }
 
-        if (!$this->canManagePayroll($currentUser)) {
+        if (!$this->payrollDomainService->canManagePayroll($currentUser)) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
@@ -799,7 +859,7 @@ class PayrollController extends Controller
         $periodStart = Carbon::createFromFormat('Y-m', $request->period_month)->startOfMonth();
         $periodEnd = $periodStart->copy()->endOfMonth();
 
-        $structure = $this->resolvePayrollStructure(
+        $structure = $this->payrollDomainService->resolvePayrollStructure(
             $currentUser->organization_id,
             $targetUser->id,
             $periodStart,
@@ -810,8 +870,8 @@ class PayrollController extends Controller
         }
 
         $basicSalary = (float) $structure->basic_salary;
-        [$allowances, $allowanceTotal] = $this->computeComponents($structure->allowances->toArray(), $basicSalary);
-        [$deductions, $deductionTotal] = $this->computeComponents($structure->deductions->toArray(), $basicSalary);
+        [$allowances, $allowanceTotal] = $this->payrollDomainService->computeComponents($structure->allowances->toArray(), $basicSalary);
+        [$deductions, $deductionTotal] = $this->payrollDomainService->computeComponents($structure->deductions->toArray(), $basicSalary);
         $net = max(0, $basicSalary + $allowanceTotal - $deductionTotal);
 
         $payslip = Payslip::updateOrCreate(
@@ -837,21 +897,28 @@ class PayrollController extends Controller
             ]
         );
 
+        $this->auditLogService->log(
+            action: 'payroll.payslip_generated',
+            actor: $currentUser,
+            target: $payslip,
+            metadata: [
+                'user_id' => $targetUser->id,
+                'period_month' => $request->period_month,
+                'net_salary' => (float) $payslip->net_salary,
+            ],
+            request: $request
+        );
+
         return response()->json($payslip->load(['user', 'generatedBy', 'payrollStructure']), 201);
     }
 
-    public function payNow(Request $request)
+    public function payNow(PayPayslipsRequest $request)
     {
-        $request->validate([
-            'payslip_ids' => 'required|array|min:1',
-            'payslip_ids.*' => 'integer',
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['message' => 'Organization is required.'], 422);
         }
-        if (!$this->canManagePayroll($currentUser)) {
+        if (!$this->payrollDomainService->canManagePayroll($currentUser)) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
@@ -903,6 +970,18 @@ class PayrollController extends Controller
             );
         }
 
+        $this->auditLogService->log(
+            action: 'payroll.payslips_marked_paid',
+            actor: $currentUser,
+            target: 'PayslipBatch',
+            metadata: [
+                'paid_count' => $freshPayslips->count(),
+                'payslip_ids' => $freshPayslips->pluck('id')->values()->all(),
+                'user_ids' => $freshPayslips->pluck('user_id')->unique()->values()->all(),
+            ],
+            request: $request
+        );
+
         return response()->json([
             'message' => 'Payment processed and notifications sent.',
             'paid_count' => $freshPayslips->count(),
@@ -911,7 +990,7 @@ class PayrollController extends Controller
 
     public function showPayslip(Request $request, int $id)
     {
-        $payslip = $this->findPayslip($request, $id);
+        $payslip = $this->payrollDomainService->findPayslip($request, $id);
         if (!$payslip) {
             return response()->json(['message' => 'Payslip not found'], 404);
         }
@@ -921,7 +1000,7 @@ class PayrollController extends Controller
 
     public function downloadPayslipPdf(Request $request, int $id)
     {
-        $payslip = $this->findPayslip($request, $id);
+        $payslip = $this->payrollDomainService->findPayslip($request, $id);
         if (!$payslip) {
             return response()->json(['message' => 'Payslip not found'], 404);
         }
@@ -943,110 +1022,5 @@ class PayrollController extends Controller
             'Content-Type' => 'application/pdf',
             'Content-Disposition' => 'attachment; filename="'.$fileName.'"',
         ]);
-    }
-
-    private function resolvePayrollStructure(int $organizationId, int $userId, Carbon $periodStart, ?int $structureId): ?PayrollStructure
-    {
-        $query = PayrollStructure::with(['allowances', 'deductions'])
-            ->where('organization_id', $organizationId)
-            ->where('user_id', $userId);
-
-        if ($structureId) {
-            return $query->where('id', $structureId)->first();
-        }
-
-        return $query
-            ->whereDate('effective_from', '<=', $periodStart->toDateString())
-            ->where(function ($q) use ($periodStart) {
-                $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $periodStart->toDateString());
-            })
-            ->orderByDesc('effective_from')
-            ->first();
-    }
-
-    private function computeComponents(array $items, float $basicSalary): array
-    {
-        $rows = [];
-        $total = 0.0;
-
-        foreach ($items as $item) {
-            $type = (string) ($item['calculation_type'] ?? 'fixed');
-            $amount = (float) ($item['amount'] ?? 0);
-            $computed = $type === 'percentage'
-                ? round(($basicSalary * $amount) / 100, 2)
-                : round($amount, 2);
-
-            $rows[] = [
-                'name' => (string) ($item['name'] ?? 'Component'),
-                'calculation_type' => $type,
-                'value' => $amount,
-                'computed_amount' => $computed,
-            ];
-            $total += $computed;
-        }
-
-        return [$rows, round($total, 2)];
-    }
-
-    private function findPayslip(Request $request, int $id): ?Payslip
-    {
-        $currentUser = $request->user();
-        if (!$currentUser || !$currentUser->organization_id) {
-            return null;
-        }
-
-        $query = Payslip::where('organization_id', $currentUser->organization_id)->where('id', $id);
-        if (!$this->canManagePayroll($currentUser)) {
-            $query->where('user_id', $currentUser->id);
-        }
-
-        return $query->first();
-    }
-
-    private function findPayrollRecord(Request $request, int $id): ?Payroll
-    {
-        $currentUser = $request->user();
-        if (!$currentUser || !$currentUser->organization_id) {
-            return null;
-        }
-        if (!$this->canManagePayroll($currentUser)) {
-            return null;
-        }
-
-        return Payroll::where('organization_id', $currentUser->organization_id)
-            ->where('id', $id)
-            ->first();
-    }
-
-    private function canManagePayroll(User $user): bool
-    {
-        return in_array($user->role, ['admin', 'manager'], true);
-    }
-
-    private function sendPayrollPaidNotification(Payroll $payroll, ?int $senderId = null): void
-    {
-        if (!$payroll->organization_id || !$payroll->user_id) {
-            return;
-        }
-
-        $currency = (string) config('payroll.default_currency', 'INR');
-        $amount = round((float) $payroll->net_salary, 2);
-        $period = (string) $payroll->payroll_month;
-
-        $this->notificationService->sendToUsers(
-            organizationId: (int) $payroll->organization_id,
-            userIds: collect([(int) $payroll->user_id]),
-            senderId: $senderId,
-            type: 'salary_credited',
-            title: 'Salary Credited',
-            message: "Your salary of {$currency} {$amount} was paid today for {$period}.",
-            meta: [
-                'payroll_id' => $payroll->id,
-                'period_month' => $period,
-                'currency' => $currency,
-                'amount' => $amount,
-                'paid_at' => optional($payroll->paid_at)->toIso8601String(),
-            ]
-        );
     }
 }

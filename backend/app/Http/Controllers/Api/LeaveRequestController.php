@@ -6,12 +6,17 @@ use App\Http\Controllers\Controller;
 use App\Models\AttendanceRecord;
 use App\Models\LeaveRequest;
 use App\Models\User;
+use App\Services\Audit\AuditLogService;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Http\Request;
 
 class LeaveRequestController extends Controller
 {
+    public function __construct(private readonly AuditLogService $auditLogService)
+    {
+    }
+
     public function index(Request $request)
     {
         $request->validate([
@@ -79,6 +84,17 @@ class LeaveRequestController extends Controller
             'status' => 'pending',
         ]);
 
+        $this->auditLogService->log(
+            action: 'leave.requested',
+            actor: $currentUser,
+            target: $leave,
+            metadata: [
+                'start_date' => $leave->start_date,
+                'end_date' => $leave->end_date,
+            ],
+            request: $request
+        );
+
         return response()->json([
             'message' => 'Leave request submitted.',
             'data' => $leave->load(['user:id,name,email,role', 'reviewer:id,name,email', 'revokeReviewer:id,name,email']),
@@ -113,6 +129,18 @@ class LeaveRequestController extends Controller
 
         $this->applyApprovedLeaveToAttendance($leave);
 
+        $this->auditLogService->log(
+            action: 'leave.approved',
+            actor: $currentUser,
+            target: $leave,
+            metadata: [
+                'employee_id' => $leave->user_id,
+                'start_date' => $leave->start_date,
+                'end_date' => $leave->end_date,
+            ],
+            request: $request
+        );
+
         return response()->json([
             'message' => 'Leave request approved.',
             'data' => $leave->fresh()->load(['user:id,name,email,role', 'reviewer:id,name,email', 'revokeReviewer:id,name,email']),
@@ -144,6 +172,18 @@ class LeaveRequestController extends Controller
             'reviewed_at' => now(),
             'review_note' => $request->review_note,
         ]);
+
+        $this->auditLogService->log(
+            action: 'leave.rejected',
+            actor: $currentUser,
+            target: $leave,
+            metadata: [
+                'employee_id' => $leave->user_id,
+                'start_date' => $leave->start_date,
+                'end_date' => $leave->end_date,
+            ],
+            request: $request
+        );
 
         return response()->json([
             'message' => 'Leave request rejected.',
@@ -184,6 +224,17 @@ class LeaveRequestController extends Controller
             'revoke_review_note' => null,
         ]);
 
+        $this->auditLogService->log(
+            action: 'leave.revoke_requested',
+            actor: $currentUser,
+            target: $leave,
+            metadata: [
+                'start_date' => $leave->start_date,
+                'end_date' => $leave->end_date,
+            ],
+            request: $request
+        );
+
         return response()->json([
             'message' => 'Leave revoke request submitted.',
             'data' => $leave->fresh()->load(['user:id,name,email,role', 'reviewer:id,name,email', 'revokeReviewer:id,name,email']),
@@ -219,6 +270,18 @@ class LeaveRequestController extends Controller
 
         $this->rollbackApprovedLeaveFromAttendance($leave);
 
+        $this->auditLogService->log(
+            action: 'leave.revoke_approved',
+            actor: $currentUser,
+            target: $leave,
+            metadata: [
+                'employee_id' => $leave->user_id,
+                'start_date' => $leave->start_date,
+                'end_date' => $leave->end_date,
+            ],
+            request: $request
+        );
+
         return response()->json([
             'message' => 'Leave revoke request approved.',
             'data' => $leave->fresh()->load(['user:id,name,email,role', 'reviewer:id,name,email', 'revokeReviewer:id,name,email']),
@@ -250,6 +313,18 @@ class LeaveRequestController extends Controller
             'revoke_reviewed_at' => now(),
             'revoke_review_note' => $request->review_note,
         ]);
+
+        $this->auditLogService->log(
+            action: 'leave.revoke_rejected',
+            actor: $currentUser,
+            target: $leave,
+            metadata: [
+                'employee_id' => $leave->user_id,
+                'start_date' => $leave->start_date,
+                'end_date' => $leave->end_date,
+            ],
+            request: $request
+        );
 
         return response()->json([
             'message' => 'Leave revoke request rejected.',

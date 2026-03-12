@@ -16,12 +16,12 @@ class AuthenticateApiToken
         $header = (string) $request->header('Authorization', '');
 
         if (!preg_match('/Bearer\s+(.+)/i', $header, $matches)) {
-            return response()->json(['message' => 'Unauthenticated.'], 401);
+            return $this->unauthorizedResponse();
         }
 
         $plainToken = trim($matches[1]);
         if ($plainToken === '') {
-            return response()->json(['message' => 'Unauthenticated.'], 401);
+            return $this->unauthorizedResponse();
         }
 
         $tokenRecord = DB::table('personal_access_tokens')
@@ -33,12 +33,12 @@ class AuthenticateApiToken
             ->first();
 
         if (!$tokenRecord || $tokenRecord->tokenable_type !== User::class) {
-            return response()->json(['message' => 'Unauthenticated.'], 401);
+            return $this->unauthorizedResponse();
         }
 
         $user = User::find($tokenRecord->tokenable_id);
         if (!$user) {
-            return response()->json(['message' => 'Unauthenticated.'], 401);
+            return $this->unauthorizedResponse();
         }
 
         Auth::setUser($user);
@@ -59,5 +59,14 @@ class AuthenticateApiToken
             ]);
 
         return $next($request);
+    }
+
+    private function unauthorizedResponse(): Response
+    {
+        return response()->json([
+            'success' => false,
+            'message' => 'Unauthenticated.',
+            'error_code' => 'UNAUTHORIZED',
+        ], 401);
     }
 }

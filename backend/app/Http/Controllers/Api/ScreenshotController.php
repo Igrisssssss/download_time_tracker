@@ -6,11 +6,18 @@ use App\Http\Controllers\Controller;
 use App\Models\Screenshot;
 use App\Models\TimeEntry;
 use App\Models\User;
+use App\Services\Audit\AuditLogService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class ScreenshotController extends Controller
 {
+    public function __construct(private readonly AuditLogService $auditLogService)
+    {
+    }
+
     private function canViewAll(?User $user): bool
     {
         return $user && in_array($user->role, ['admin', 'manager'], true);
@@ -57,8 +64,8 @@ class ScreenshotController extends Controller
         $validated = $request->validate([
             'time_entry_id' => 'required|exists:time_entries,id',
             'image' => 'nullable|image|max:10240',
-            'filename' => 'nullable|string',
-            'thumbnail' => 'nullable|string',
+            'filename' => 'nullable|string|max:255',
+            'thumbnail' => 'nullable|string|max:65535',
             'blurred' => 'nullable|boolean',
         ]);
 
@@ -76,9 +83,11 @@ class ScreenshotController extends Controller
 
         $filename = $validated['filename'] ?? null;
         if ($request->hasFile('image')) {
-            $path = $request->file('image')->store('screenshots', 'public');
+            $path = $request->file('image')->store('', 'screenshots');
             $filename = basename($path);
         }
+
+        $filename = $filename ? basename($filename) : null;
 
         if (!$filename) {
             return response()->json(['message' => 'Screenshot image or filename is required.'], 422);
@@ -92,6 +101,25 @@ class ScreenshotController extends Controller
         ]);
 
         return response()->json($screenshot, 201);
+    }
+
+    public function file(Request $request, Screenshot $screenshot): BinaryFileResponse|\Illuminate\Http\JsonResponse
+    {
+        $path = basename((string) $screenshot->filename);
+
+        if ($path === '' || !$request->hasValidSignature() || !Storage::disk('screenshots')->exists($path)) {
+            return response()->json(['message' => 'Screenshot not found'], 404);
+        }
+
+        $extension = pathinfo($path, PATHINFO_EXTENSION);
+        $downloadName = Str::slug(pathinfo($path, PATHINFO_FILENAME) ?: 'screenshot').($extension ? '.'.$extension : '');
+
+        return response()->file(Storage::disk('screenshots')->path($path), [
+            'Content-Type' => Storage::disk('screenshots')->mimeType($path) ?: 'image/png',
+            'Content-Disposition' => 'inline; filename="'.$downloadName.'"',
+            'Cache-Control' => 'private, max-age=300',
+            'X-Content-Type-Options' => 'nosniff',
+        ]);
     }
 
     /**
@@ -134,7 +162,20 @@ class ScreenshotController extends Controller
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
-        Storage::disk('public')->delete('screenshots/'.$screenshot->filename);
+        $screenshot->loadMissing('timeEntry.user');
+        $this->auditLogService->log(
+            action: 'screenshot.deleted',
+            actor: request()->user(),
+            target: $screenshot,
+            metadata: [
+                'time_entry_id' => $screenshot->time_entry_id,
+                'user_id' => $screenshot->timeEntry?->user_id,
+                'recorded_at' => (string) $screenshot->created_at,
+            ],
+            request: request()
+        );
+
+        Storage::disk('screenshots')->delete(basename((string) $screenshot->filename));
         $screenshot->delete();
 
         return response()->json(['message' => 'Screenshot deleted successfully']);

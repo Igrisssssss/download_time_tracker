@@ -2,13 +2,18 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Concerns\InteractsWithApiResponses;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Api\ReportGroups\StoreReportGroupRequest;
+use App\Http\Requests\Api\ReportGroups\UpdateReportGroupRequest;
 use App\Models\ReportGroup;
 use App\Models\User;
 use Illuminate\Http\Request;
 
 class ReportGroupController extends Controller
 {
+    use InteractsWithApiResponses;
+
     public function index(Request $request)
     {
         $currentUser = $request->user();
@@ -27,14 +32,8 @@ class ReportGroupController extends Controller
         return response()->json(['data' => $groups]);
     }
 
-    public function store(Request $request)
+    public function store(StoreReportGroupRequest $request)
     {
-        $request->validate([
-            'name' => 'required|string|max:100',
-            'user_ids' => 'nullable|array',
-            'user_ids.*' => 'integer',
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['message' => 'Organization is required'], 422);
@@ -51,17 +50,11 @@ class ReportGroupController extends Controller
         $userIds = $this->resolveOrgUserIds($currentUser->organization_id, $request->input('user_ids', []));
         $group->users()->sync($userIds);
 
-        return response()->json($group->load(['users:id,name,email,role']), 201);
+        return $this->createdResponse($group->load(['users:id,name,email,role'])->toArray(), 'Group created.');
     }
 
-    public function update(Request $request, int $id)
+    public function update(UpdateReportGroupRequest $request, int $id)
     {
-        $request->validate([
-            'name' => 'sometimes|string|max:100',
-            'user_ids' => 'nullable|array',
-            'user_ids.*' => 'integer',
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['message' => 'Organization is required'], 422);
@@ -85,7 +78,7 @@ class ReportGroupController extends Controller
             $group->users()->sync($userIds);
         }
 
-        return response()->json($group->fresh()->load(['users:id,name,email,role']));
+        return $this->updatedResponse($group->fresh()->load(['users:id,name,email,role'])->toArray(), 'Group updated.');
     }
 
     public function destroy(Request $request, int $id)
@@ -105,7 +98,7 @@ class ReportGroupController extends Controller
 
         $group->delete();
 
-        return response()->json(['message' => 'Group deleted']);
+        return $this->deletedResponse('Group deleted');
     }
 
     private function canManage(User $user): bool
@@ -129,4 +122,3 @@ class ReportGroupController extends Controller
             ->all();
     }
 }
-

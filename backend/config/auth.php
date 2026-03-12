@@ -112,4 +112,8 @@ return [
 
     'password_timeout' => env('AUTH_PASSWORD_TIMEOUT', 10800),
 
+    'api_tokens' => [
+        'ttl_minutes' => (int) env('API_TOKEN_TTL_MINUTES', 10080),
+    ],
+
 ];

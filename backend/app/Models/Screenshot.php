@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\URL;
 
 class Screenshot extends Model
 {
@@ -22,12 +23,11 @@ class Screenshot extends Model
 
     public function getPathAttribute(): string
     {
-        $request = request();
-        $baseUrl = $request
-            ? rtrim($request->getSchemeAndHttpHost(), '/')
-            : rtrim((string) config('app.url'), '/');
-
-        return $baseUrl.'/storage/screenshots/'.$this->filename;
+        return URL::temporarySignedRoute(
+            'screenshots.file',
+            now()->addMinutes((int) env('SCREENSHOT_URL_TTL_MINUTES', 5)),
+            ['screenshot' => $this->getKey()]
+        );
     }
 
     public function getRecordedAtAttribute(): string

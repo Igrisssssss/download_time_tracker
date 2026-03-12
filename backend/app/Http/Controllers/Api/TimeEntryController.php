@@ -8,6 +8,7 @@ use App\Models\AttendanceRecord;
 use App\Models\LeaveRequest;
 use App\Models\TimeEntry;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 
@@ -134,29 +135,17 @@ class TimeEntryController extends Controller
             }
         }
 
-        $runningQuery = TimeEntry::where('user_id', $user->id)->whereNull('end_time');
-        if ($slot !== 'primary') {
-            $runningQuery->where('timer_slot', $slot);
-        }
-
-        $runningEntries = $runningQuery->orderByDesc('start_time')->get();
-        foreach ($runningEntries as $running) {
-            $durationSeconds = max(
-                0,
-                now()->getTimestamp() - Carbon::parse($running->start_time)->getTimestamp()
-            );
-
-            $running->update([
-                'end_time' => now(),
-                'duration' => (int) $durationSeconds,
-            ]);
-        }
+        $startedAt = now();
+        $runningEntries = $this->runningEntriesQuery((int) $user->id, $slot)
+            ->orderByDesc('start_time')
+            ->get();
+        $this->closeRunningEntries($runningEntries, $startedAt);
 
         $timeEntry = TimeEntry::create([
             'description' => $request->description,
             'project_id' => $request->project_id,
             'task_id' => $request->task_id,
-            'start_time' => now(),
+            'start_time' => $startedAt,
             'user_id' => $user->id,
             'timer_slot' => $slot,
         ]);
@@ -176,35 +165,20 @@ class TimeEntryController extends Controller
         }
         $slot = $request->get('timer_slot', 'primary');
 
-        $timeEntry = TimeEntry::where('user_id', $user->id)
-            ->where('timer_slot', $slot)
-            ->whereNull('end_time')
+        $runningEntries = $this->runningEntriesQuery((int) $user->id, $slot)
             ->orderByDesc('start_time')
-            ->first();
+            ->get();
 
-        if (!$timeEntry && $slot === 'primary') {
-            $timeEntry = TimeEntry::where('user_id', $user->id)
-                ->whereNull('end_time')
-                ->orderByDesc('start_time')
-                ->first();
-        }
-
-        if (!$timeEntry) {
+        if ($runningEntries->isEmpty()) {
             return response()->json(['message' => 'No running timer found'], 404);
         }
 
-        $durationSeconds = max(
-            0,
-            now()->getTimestamp() - Carbon::parse($timeEntry->start_time)->getTimestamp()
-        );
-
-        $timeEntry->update([
-            'end_time' => now(),
-            'duration' => (int) $durationSeconds,
-        ]);
+        $stoppedAt = now();
+        $this->closeRunningEntries($runningEntries, $stoppedAt);
+        $timeEntry = $runningEntries->first();
 
         if ($slot === 'primary') {
-            $this->ensureAttendanceCheckedOutForBreak($user->id);
+            $this->ensureAttendanceCheckedOutForBreak($user->id, $stoppedAt);
         }
 
         return response()->json($timeEntry);
@@ -222,9 +196,7 @@ class TimeEntryController extends Controller
         }
         $slot = $request->get('timer_slot', 'primary');
 
-        $timeEntry = TimeEntry::where('user_id', $user->id)
-            ->where('timer_slot', $slot)
-            ->whereNull('end_time')
+        $timeEntry = $this->runningEntriesQuery((int) $user->id, $slot)
             ->with('task', 'project')
             ->orderByDesc('start_time')
             ->first();
@@ -251,14 +223,14 @@ class TimeEntryController extends Controller
         }
 
         $today = now()->startOfDay();
-        
+
         $timeEntries = TimeEntry::with('task', 'project')
             ->where('user_id', $user->id)
             ->where('start_time', '>=', $today)
             ->orderBy('start_time', 'desc')
             ->get();
 
-        $totalDuration = $timeEntries->sum('duration');
+        $totalDuration = (int) $timeEntries->sum(fn (TimeEntry $entry) => $this->effectiveDuration($entry));
 
         return response()->json([
             'time_entries' => $timeEntries,
@@ -310,7 +282,7 @@ class TimeEntryController extends Controller
         return null;
     }
 
-    private function ensureAttendanceCheckedOutForBreak(int $userId): void
+    private function ensureAttendanceCheckedOutForBreak(int $userId, ?Carbon $checkOutAt = null): void
     {
         $today = now()->toDateString();
         $record = AttendanceRecord::where('user_id', $userId)
@@ -328,7 +300,7 @@ class TimeEntryController extends Controller
             return;
         }
 
-        $checkOutAt = now();
+        $checkOutAt = $checkOutAt ?: now();
         $sessionWorkedSeconds = max(0, Carbon::parse($openPunch->punch_in_at)->diffInSeconds($checkOutAt));
         $openPunch->update([
             'punch_out_at' => $checkOutAt,
@@ -359,5 +331,49 @@ class TimeEntryController extends Controller
     private function toLateMinutes(int|float $rawMinutes): int
     {
         return (int) max(0, floor($rawMinutes));
+    }
+
+    private function runningEntriesQuery(int $userId, string $slot): Builder
+    {
+        return TimeEntry::query()
+            ->where('user_id', $userId)
+            ->whereNull('end_time')
+            ->where(function (Builder $query) use ($slot) {
+                if ($slot === 'primary') {
+                    $query->where('timer_slot', 'primary')
+                        ->orWhereNull('timer_slot');
+
+                    return;
+                }
+
+                $query->where('timer_slot', $slot);
+            });
+    }
+
+    private function closeRunningEntries(Collection $runningEntries, Carbon $endedAt): void
+    {
+        foreach ($runningEntries as $running) {
+            $running->update([
+                'end_time' => $endedAt,
+                'duration' => $this->effectiveDuration($running, $endedAt),
+            ]);
+        }
+    }
+
+    private function effectiveDuration(TimeEntry $entry, ?Carbon $endAt = null): int
+    {
+        if ($entry->end_time) {
+            return (int) max(
+                (int) ($entry->duration ?? 0),
+                Carbon::parse($entry->start_time)->diffInSeconds(Carbon::parse($entry->end_time))
+            );
+        }
+
+        $resolvedEnd = $endAt ?: now();
+
+        return (int) max(
+            (int) ($entry->duration ?? 0),
+            Carbon::parse($entry->start_time)->diffInSeconds($resolvedEnd)
+        );
     }
 }

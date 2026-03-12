@@ -2,13 +2,25 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Concerns\InteractsWithApiResponses;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Api\Settings\UpdateOrganizationRequest;
+use App\Http\Requests\Api\Settings\UpdatePasswordRequest as UpdatePasswordFormRequest;
+use App\Http\Requests\Api\Settings\UpdatePreferencesRequest;
+use App\Http\Requests\Api\Settings\UpdateProfileRequest;
+use App\Services\Audit\AuditLogService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 
 class SettingsController extends Controller
 {
+    use InteractsWithApiResponses;
+
+    public function __construct(private readonly AuditLogService $auditLogService)
+    {
+    }
+
     public function me(Request $request)
     {
         $user = $request->user();
@@ -18,25 +30,21 @@ class SettingsController extends Controller
 
         $user->load('organization');
 
-        return response()->json([
+        return $this->successResponse([
             'user' => $user,
             'organization' => $user->organization,
             'can_manage_org' => $this->canManageOrg($user),
         ]);
     }
 
-    public function updateProfile(Request $request)
+    public function updateProfile(UpdateProfileRequest $request)
     {
         $user = $request->user();
         if (!$user) {
             return response()->json(['message' => 'Unauthenticated.'], 401);
         }
 
-        $validated = $request->validate([
-            'name' => 'required|string|max:255',
-            'email' => 'required|email|max:255|unique:users,email,'.$user->id,
-            'avatar' => 'nullable|string|max:500',
-        ]);
+        $validated = $request->validated();
 
         $user->update([
             'name' => $validated['name'],
@@ -44,23 +52,30 @@ class SettingsController extends Controller
             'avatar' => $validated['avatar'] ?? null,
         ]);
 
-        return response()->json([
+        $this->auditLogService->log(
+            action: 'settings.profile_updated',
+            actor: $user,
+            target: $user,
+            metadata: [
+                'changed_fields' => ['name', 'email', 'avatar'],
+            ],
+            request: $request
+        );
+
+        return $this->updatedResponse([
             'message' => 'Profile updated successfully.',
             'user' => $user->fresh(),
-        ]);
+        ], 'Profile updated successfully.');
     }
 
-    public function updatePassword(Request $request)
+    public function updatePassword(UpdatePasswordFormRequest $request)
     {
         $user = $request->user();
         if (!$user) {
             return response()->json(['message' => 'Unauthenticated.'], 401);
         }
 
-        $validated = $request->validate([
-            'current_password' => 'required|string',
-            'new_password' => 'required|string|min:8|confirmed',
-        ]);
+        $validated = $request->validated();
 
         if (!Hash::check($validated['current_password'], $user->password)) {
             return response()->json(['message' => 'Current password is incorrect.'], 422);
@@ -70,24 +85,25 @@ class SettingsController extends Controller
             'password' => $validated['new_password'],
         ]);
 
-        return response()->json(['message' => 'Password updated successfully.']);
+        $this->auditLogService->log(
+            action: 'settings.password_updated',
+            actor: $user,
+            target: $user,
+            metadata: [],
+            request: $request
+        );
+
+        return $this->updatedResponse([], 'Password updated successfully.');
     }
 
-    public function updatePreferences(Request $request)
+    public function updatePreferences(UpdatePreferencesRequest $request)
     {
         $user = $request->user();
         if (!$user) {
             return response()->json(['message' => 'Unauthenticated.'], 401);
         }
 
-        $validated = $request->validate([
-            'timezone' => 'nullable|string|max:64',
-            'notifications' => 'nullable|array',
-            'notifications.email' => 'nullable|boolean',
-            'notifications.weekly_summary' => 'nullable|boolean',
-            'notifications.project_updates' => 'nullable|boolean',
-            'notifications.task_assignments' => 'nullable|boolean',
-        ]);
+        $validated = $request->validated();
 
         $existing = is_array($user->settings) ? $user->settings : [];
         $user->settings = array_merge($existing, [
@@ -105,13 +121,24 @@ class SettingsController extends Controller
         ]);
         $user->save();
 
-        return response()->json([
+        $this->auditLogService->log(
+            action: 'settings.preferences_updated',
+            actor: $user,
+            target: $user,
+            metadata: [
+                'timezone' => $user->settings['timezone'] ?? 'UTC',
+                'notification_keys' => array_keys($user->settings['notifications'] ?? []),
+            ],
+            request: $request
+        );
+
+        return $this->updatedResponse([
             'message' => 'Preferences updated successfully.',
             'settings' => $user->settings,
-        ]);
+        ], 'Preferences updated successfully.');
     }
 
-    public function updateOrganization(Request $request)
+    public function updateOrganization(UpdateOrganizationRequest $request)
     {
         $user = $request->user();
         if (!$user || !$user->organization_id) {
@@ -126,10 +153,7 @@ class SettingsController extends Controller
             return response()->json(['message' => 'Organization not found'], 404);
         }
 
-        $validated = $request->validate([
-            'name' => 'required|string|max:255',
-            'slug' => 'required|string|max:255',
-        ]);
+        $validated = $request->validated();
 
         $slug = Str::slug($validated['slug']) ?: Str::slug($validated['name']);
         if (!$slug) {
@@ -152,10 +176,21 @@ class SettingsController extends Controller
             'slug' => $slug,
         ]);
 
-        return response()->json([
+        $this->auditLogService->log(
+            action: 'settings.organization_updated',
+            actor: $user,
+            target: $organization,
+            metadata: [
+                'name' => $organization->name,
+                'slug' => $organization->slug,
+            ],
+            request: $request
+        );
+
+        return $this->updatedResponse([
             'message' => 'Organization updated successfully.',
             'organization' => $organization->fresh(),
-        ]);
+        ], 'Organization updated successfully.');
     }
 
     public function billing(Request $request)

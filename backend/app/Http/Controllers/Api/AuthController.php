@@ -2,9 +2,13 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Concerns\InteractsWithApiResponses;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Api\Auth\LoginRequest;
+use App\Http\Requests\Api\Auth\RegisterRequest;
 use App\Models\Organization;
 use App\Models\User;
+use App\Services\Audit\AuditLogService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -13,16 +17,14 @@ use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
-    public function register(Request $request)
-    {
-        $request->validate([
-            'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users',
-            'password' => 'required|string|min:8|confirmed',
-            'role' => 'nullable|in:admin,employee',
-            'organization_name' => 'nullable|string|max:255',
-        ]);
+    use InteractsWithApiResponses;
 
+    public function __construct(private readonly AuditLogService $auditLogService)
+    {
+    }
+
+    public function register(RegisterRequest $request)
+    {
         $result = DB::transaction(function () use ($request) {
             $role = $request->get('role', 'admin');
             $organization = null;
@@ -80,20 +82,15 @@ class AuthController extends Controller
             return compact('user', 'token', 'organization');
         });
 
-        return response()->json([
+        return $this->createdResponse([
             'user' => $result['user'],
             'token' => $result['token'],
             'organization' => $result['organization'],
-        ], 201);
+        ], 'Registered successfully.');
     }
 
-    public function login(Request $request)
+    public function login(LoginRequest $request)
     {
-        $request->validate([
-            'email' => 'required|email',
-            'password' => 'required',
-        ]);
-
         $user = User::where('email', $request->email)->first();
 
         if (!$user || !Hash::check($request->password, $user->password)) {
@@ -104,11 +101,21 @@ class AuthController extends Controller
 
         $token = $this->issueToken($user);
 
-        return response()->json([
+        $this->auditLogService->log(
+            action: 'auth.login',
+            actor: $user,
+            target: $user,
+            metadata: [
+                'role' => $user->role,
+            ],
+            request: $request
+        );
+
+        return $this->successResponse([
             'user' => $user,
             'token' => $token,
             'organization' => $user->organization,
-        ]);
+        ], 'Logged in successfully.');
     }
 
     public function user(Request $request)
@@ -116,16 +123,21 @@ class AuthController extends Controller
         $user = $request->user();
 
         if (!$user) {
-            return response()->json(['message' => 'Unauthenticated.'], 401);
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthenticated.',
+                'error_code' => 'UNAUTHORIZED',
+            ], 401);
         }
 
         $user->load('organization');
 
-        return response()->json($user);
+        return $this->successResponse($user->toArray());
     }
 
     public function logout(Request $request)
     {
+        $user = $request->user();
         $tokenRecord = $request->attributes->get('access_token');
 
         if ($tokenRecord && isset($tokenRecord->id)) {
@@ -142,7 +154,19 @@ class AuthController extends Controller
             }
         }
 
-        return response()->json(['message' => 'Logged out successfully']);
+        if ($user) {
+            $this->auditLogService->log(
+                action: 'auth.logout',
+                actor: $user,
+                target: $user,
+                metadata: [
+                    'token_id' => $tokenRecord->id ?? null,
+                ],
+                request: $request
+            );
+        }
+
+        return $this->successResponse([], 'Logged out successfully');
     }
 
     public function handoff(Request $request)
@@ -150,22 +174,27 @@ class AuthController extends Controller
         $user = $request->user();
 
         if (!$user) {
-            return response()->json(['message' => 'Unauthenticated.'], 401);
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthenticated.',
+                'error_code' => 'UNAUTHORIZED',
+            ], 401);
         }
 
         $token = $this->issueToken($user, 'web-handoff-token');
         $user->load('organization');
 
-        return response()->json([
+        return $this->successResponse([
             'user' => $user,
             'token' => $token,
             'organization' => $user->organization,
-        ]);
+        ], 'Handoff token issued.');
     }
 
     private function issueToken(User $user, string $name = 'auth-token'): string
     {
         $plainToken = bin2hex(random_bytes(40));
+        $ttlMinutes = (int) config('auth.api_tokens.ttl_minutes', 10080);
 
         DB::table('personal_access_tokens')->insert([
             'tokenable_type' => User::class,
@@ -174,7 +203,7 @@ class AuthController extends Controller
             'token' => hash('sha256', $plainToken),
             'abilities' => json_encode(['*']),
             'last_used_at' => null,
-            'expires_at' => null,
+            'expires_at' => $ttlMinutes > 0 ? now()->addMinutes($ttlMinutes) : null,
             'created_at' => now(),
             'updated_at' => now(),
         ]);

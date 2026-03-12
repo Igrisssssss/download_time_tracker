@@ -2,7 +2,10 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Concerns\InteractsWithApiResponses;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Api\Notifications\ListNotificationsRequest;
+use App\Http\Requests\Api\Notifications\PublishNotificationRequest;
 use App\Models\AppNotification;
 use App\Models\User;
 use App\Services\AppNotificationService;
@@ -10,16 +13,14 @@ use Illuminate\Http\Request;
 
 class NotificationController extends Controller
 {
+    use InteractsWithApiResponses;
+
     public function __construct(private readonly AppNotificationService $notificationService)
     {
     }
 
-    public function index(Request $request)
+    public function index(ListNotificationsRequest $request)
     {
-        $request->validate([
-            'limit' => 'nullable|integer|min:1|max:100',
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['data' => [], 'unread_count' => 0]);
@@ -29,6 +30,15 @@ class NotificationController extends Controller
         $query = AppNotification::with('sender:id,name,email')
             ->where('organization_id', $currentUser->organization_id)
             ->where('user_id', $currentUser->id)
+            ->when($request->filled('type'), fn ($builder) => $builder->where('type', (string) $request->type))
+            ->when($request->boolean('unread_only'), fn ($builder) => $builder->where('is_read', false))
+            ->when($request->filled('q'), function ($builder) use ($request) {
+                $term = trim((string) $request->q);
+                $builder->where(function ($nested) use ($term) {
+                    $nested->where('title', 'like', "%{$term}%")
+                        ->orWhere('message', 'like', "%{$term}%");
+                });
+            })
             ->orderByDesc('created_at');
 
         return response()->json([
@@ -37,16 +47,8 @@ class NotificationController extends Controller
         ]);
     }
 
-    public function publish(Request $request)
+    public function publish(PublishNotificationRequest $request)
     {
-        $request->validate([
-            'type' => 'required|in:announcement,news',
-            'title' => 'required|string|max:150',
-            'message' => 'required|string|max:3000',
-            'recipient_user_ids' => 'nullable|array',
-            'recipient_user_ids.*' => 'integer',
-        ]);
-
         $currentUser = $request->user();
         if (!$currentUser || !$currentUser->organization_id) {
             return response()->json(['message' => 'Organization is required.'], 422);
@@ -73,7 +75,7 @@ class NotificationController extends Controller
             message: (string) $request->message
         );
 
-        return response()->json(['message' => 'Notification published.']);
+        return $this->createdResponse([], 'Notification published.');
     }
 
     public function markRead(Request $request, int $id)
@@ -97,7 +99,7 @@ class NotificationController extends Controller
             ]);
         }
 
-        return response()->json(['message' => 'Marked as read.']);
+        return $this->updatedResponse([], 'Marked as read.');
     }
 
     public function markAllRead(Request $request)
@@ -116,7 +118,7 @@ class NotificationController extends Controller
                 'updated_at' => now(),
             ]);
 
-        return response()->json(['message' => 'All notifications marked as read.']);
+        return $this->updatedResponse([], 'All notifications marked as read.');
     }
 
     private function canManage(User $user): bool

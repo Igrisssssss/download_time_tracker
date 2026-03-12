@@ -4,11 +4,16 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Invoice;
+use App\Services\Audit\AuditLogService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
 class InvoiceController extends Controller
 {
+    public function __construct(private readonly AuditLogService $auditLogService)
+    {
+    }
+
     public function index(Request $request)
     {
         $user = $request->user();
@@ -88,6 +93,19 @@ class InvoiceController extends Controller
             }
         }
 
+        $this->auditLogService->log(
+            action: 'invoice.created',
+            actor: $user,
+            target: $invoice,
+            metadata: [
+                'invoice_number' => $invoice->invoice_number,
+                'status' => $invoice->status,
+                'total' => (float) $invoice->total,
+                'items_count' => count($items),
+            ],
+            request: $request
+        );
+
         return response()->json($invoice->load('items'), 201);
     }
 
@@ -122,6 +140,7 @@ class InvoiceController extends Controller
             'items.*.rate' => 'required_with:items|numeric|min:0',
         ]);
 
+        $before = $invoice->only(['client_name', 'client_email', 'subtotal', 'tax', 'total', 'status', 'due_date']);
         $invoice->update($request->only([
             'client_name',
             'client_email',
@@ -159,6 +178,18 @@ class InvoiceController extends Controller
             ]);
         }
 
+        $this->auditLogService->log(
+            action: 'invoice.updated',
+            actor: $request->user(),
+            target: $invoice,
+            metadata: [
+                'invoice_number' => $invoice->invoice_number,
+                'before' => $before,
+                'after' => $invoice->fresh()->only(['client_name', 'client_email', 'subtotal', 'tax', 'total', 'status', 'due_date']),
+            ],
+            request: $request
+        );
+
         return response()->json($invoice);
     }
 
@@ -167,6 +198,18 @@ class InvoiceController extends Controller
         if (!$this->canAccessInvoice($invoice)) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
+
+        $this->auditLogService->log(
+            action: 'invoice.deleted',
+            actor: request()->user(),
+            target: $invoice,
+            metadata: [
+                'invoice_number' => $invoice->invoice_number,
+                'status' => $invoice->status,
+                'total' => (float) $invoice->total,
+            ],
+            request: request()
+        );
 
         $invoice->delete();
 
@@ -181,6 +224,15 @@ class InvoiceController extends Controller
         }
 
         $invoice->update(['status' => 'sent']);
+        $this->auditLogService->log(
+            action: 'invoice.sent',
+            actor: request()->user(),
+            target: $invoice,
+            metadata: [
+                'invoice_number' => $invoice->invoice_number,
+            ],
+            request: request()
+        );
         return response()->json($invoice);
     }
 
@@ -195,6 +247,18 @@ class InvoiceController extends Controller
             'status' => 'paid',
             'paid_at' => now()->toDateString(),
         ]);
+
+        $this->auditLogService->log(
+            action: 'invoice.marked_paid',
+            actor: request()->user(),
+            target: $invoice,
+            metadata: [
+                'invoice_number' => $invoice->invoice_number,
+                'paid_at' => $invoice->paid_at,
+                'total' => (float) $invoice->total,
+            ],
+            request: request()
+        );
 
         return response()->json($invoice);
     }

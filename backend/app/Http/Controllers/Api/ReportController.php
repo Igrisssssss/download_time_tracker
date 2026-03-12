@@ -11,12 +11,22 @@ use App\Models\ReportGroup;
 use App\Models\Screenshot;
 use App\Models\TimeEntry;
 use App\Models\User;
+use App\Services\Reports\ActivityProductivityService;
+use App\Services\Reports\DashboardSummaryService;
+use App\Services\Reports\ReportPayloadBuilder;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Http\Request;
 
 class ReportController extends Controller
 {
+    public function __construct(
+        private readonly ActivityProductivityService $activityProductivityService,
+        private readonly DashboardSummaryService $dashboardSummaryService,
+        private readonly ReportPayloadBuilder $reportPayloadBuilder,
+    ) {
+    }
+
     private function canViewAll(?User $user): bool
     {
         return $user && in_array($user->role, ['admin', 'manager'], true);
@@ -29,89 +39,7 @@ class ReportController extends Controller
             return response()->json(['message' => 'Unauthenticated.'], 401);
         }
 
-        $now = now();
-        $todayStart = $now->copy()->startOfDay();
-        $todayEnd = $now->copy()->endOfDay();
-        $yesterdayStart = $now->copy()->subDay()->startOfDay();
-        $yesterdayEnd = $now->copy()->subDay()->endOfDay();
-        $weekStart = $now->copy()->startOfWeek();
-        $weekEnd = $now->copy()->endOfWeek();
-
-        $todayEntries = TimeEntry::with('project', 'task')
-            ->where('user_id', $user->id)
-            ->whereBetween('start_time', [$todayStart, $todayEnd])
-            ->orderBy('start_time', 'desc')
-            ->get();
-
-        $activeEntry = TimeEntry::with('project', 'task')
-            ->where('user_id', $user->id)
-            ->where('timer_slot', 'primary')
-            ->whereNull('end_time')
-            ->orderByDesc('start_time')
-            ->first();
-
-        $activeDuration = 0;
-        if ($activeEntry) {
-            $activeDuration = max(
-                0,
-                now()->getTimestamp() - Carbon::parse($activeEntry->start_time)->getTimestamp()
-            );
-            $activeEntry->duration = (int) $activeDuration;
-        }
-
-        $todayDuration = (int) $todayEntries->sum('duration');
-        $todayElapsedDuration = $todayDuration + (int) $activeDuration;
-        $allTimeDuration = (int) TimeEntry::where('user_id', $user->id)->sum('duration');
-        $allTimeElapsedDuration = $allTimeDuration + (int) $activeDuration;
-
-        $yesterdayDuration = (int) TimeEntry::where('user_id', $user->id)
-            ->whereBetween('start_time', [$yesterdayStart, $yesterdayEnd])
-            ->sum('duration');
-
-        $todayChangePercent = null;
-        if ($yesterdayDuration > 0) {
-            $todayChangePercent = (int) round((($todayElapsedDuration - $yesterdayDuration) / $yesterdayDuration) * 100);
-        }
-
-        $teamMembersCount = 0;
-        $newMembersThisWeek = 0;
-        $activeProjectsCount = 0;
-        $totalProjectsCount = 0;
-
-        if ($user->organization_id) {
-            $teamMembersCount = User::where('organization_id', $user->organization_id)->count();
-            $newMembersThisWeek = User::where('organization_id', $user->organization_id)
-                ->where('created_at', '>=', $weekStart)
-                ->count();
-
-            $activeProjectsCount = Project::where('organization_id', $user->organization_id)
-                ->where('status', 'active')
-                ->count();
-            $totalProjectsCount = Project::where('organization_id', $user->organization_id)->count();
-        }
-
-        $weekEntries = TimeEntry::where('user_id', $user->id)
-            ->whereBetween('start_time', [$weekStart, $weekEnd])
-            ->get(['duration', 'billable']);
-        $weekTotal = (int) $weekEntries->sum('duration');
-        $weekBillable = (int) $weekEntries->where('billable', true)->sum('duration');
-        $productivityScore = $weekTotal > 0 ? (int) round(($weekBillable / $weekTotal) * 100) : 0;
-
-        return response()->json([
-            'active_timer' => $activeEntry,
-            'today_entries' => $todayEntries,
-            'today_total_duration' => $todayDuration,
-            'today_total_elapsed_duration' => $todayElapsedDuration,
-            'all_time_total_duration' => $allTimeDuration,
-            'all_time_total_elapsed_duration' => $allTimeElapsedDuration,
-            'yesterday_total_duration' => $yesterdayDuration,
-            'today_change_percent' => $todayChangePercent,
-            'active_projects_count' => $activeProjectsCount,
-            'total_projects_count' => $totalProjectsCount,
-            'team_members_count' => $teamMembersCount,
-            'new_members_this_week' => $newMembersThisWeek,
-            'productivity_score' => $productivityScore,
-        ]);
+        return response()->json($this->dashboardSummaryService->build($user));
     }
 
     public function daily(Request $request)
@@ -121,7 +49,7 @@ class ReportController extends Controller
 
         $user = $request->user();
         if (!$user) {
-            return response()->json($this->emptyReport(['date' => $date]));
+            return response()->json($this->reportPayloadBuilder->emptyReport(['date' => $date]));
         }
 
         $query = TimeEntry::with('project', 'task', 'user')
@@ -139,7 +67,7 @@ class ReportController extends Controller
 
         return response()->json(array_merge(
             ['date' => $date],
-            $this->buildCommonReportPayload($timeEntries)
+            $this->reportPayloadBuilder->buildCommonReportPayload($timeEntries)
         ));
     }
 
@@ -151,7 +79,7 @@ class ReportController extends Controller
 
         $user = $request->user();
         if (!$user) {
-            return response()->json($this->emptyReport([
+            return response()->json($this->reportPayloadBuilder->emptyReport([
                 'start_date' => $startDate->toDateString(),
                 'end_date' => $endDate->toDateString(),
             ]));
@@ -175,7 +103,7 @@ class ReportController extends Controller
                 'start_date' => $startDate->toDateString(),
                 'end_date' => $endDate->toDateString(),
             ],
-            $this->buildCommonReportPayload($timeEntries)
+            $this->reportPayloadBuilder->buildCommonReportPayload($timeEntries)
         ));
     }
 
@@ -195,7 +123,7 @@ class ReportController extends Controller
 
         $user = $request->user();
         if (!$user) {
-            return response()->json($this->emptyReport([
+            return response()->json($this->reportPayloadBuilder->emptyReport([
                 'start_date' => $startDate->toDateString(),
                 'end_date' => $endDate->toDateString(),
             ]));
@@ -229,7 +157,7 @@ class ReportController extends Controller
                 'end_date' => $endDate->toDateString(),
                 'by_day' => $byDay,
             ],
-            $this->buildCommonReportPayload($timeEntries)
+            $this->reportPayloadBuilder->buildCommonReportPayload($timeEntries)
         ));
     }
 
@@ -484,27 +412,83 @@ class ReportController extends Controller
 
     public function export(Request $request)
     {
+        $request->validate([
+            'start_date' => 'nullable|date',
+            'end_date' => 'nullable|date',
+            'user_ids' => 'nullable|array',
+            'user_ids.*' => 'integer',
+            'group_ids' => 'nullable|array',
+            'group_ids.*' => 'integer',
+        ]);
+
         $user = $request->user();
         if (!$user) {
             return response()->json(['message' => 'Unauthenticated.'], 401);
         }
 
-        $startDate = $request->get('start_date', Carbon::now()->startOfMonth()->toDateString());
-        $endDate = $request->get('end_date', Carbon::now()->endOfMonth()->toDateString());
+        $startDate = Carbon::parse($request->get('start_date', Carbon::now()->startOfMonth()->toDateString()))->startOfDay();
+        $endDate = Carbon::parse($request->get('end_date', Carbon::now()->endOfMonth()->toDateString()))->endOfDay();
+        if ($startDate->greaterThan($endDate)) {
+            [$startDate, $endDate] = [$endDate->copy()->startOfDay(), $startDate->copy()->endOfDay()];
+        }
 
-        $entries = TimeEntry::with('project', 'task')
-            ->where('user_id', $user->id)
-            ->whereBetween('start_time', [$startDate, $endDate])
+        $entriesQuery = TimeEntry::with(['project', 'task', 'user'])
+            ->whereBetween('start_time', [$startDate, $endDate]);
+
+        if ($this->canViewAll($user) && $user->organization_id) {
+            $organizationUserIds = User::query()
+                ->where('organization_id', $user->organization_id)
+                ->pluck('id');
+
+            $selectedUserIds = collect($request->input('user_ids', []))
+                ->map(fn ($id) => (int) $id)
+                ->filter(fn ($id) => $id > 0)
+                ->unique()
+                ->values();
+            $selectedGroupIds = collect($request->input('group_ids', []))
+                ->map(fn ($id) => (int) $id)
+                ->filter(fn ($id) => $id > 0)
+                ->unique()
+                ->values();
+
+            if ($selectedGroupIds->isNotEmpty()) {
+                $groupUserIds = ReportGroup::query()
+                    ->where('organization_id', $user->organization_id)
+                    ->whereIn('id', $selectedGroupIds)
+                    ->with('users:id')
+                    ->get()
+                    ->flatMap(fn (ReportGroup $group) => $group->users->pluck('id'))
+                    ->map(fn ($id) => (int) $id)
+                    ->unique()
+                    ->values();
+
+                if ($selectedUserIds->isEmpty()) {
+                    $selectedUserIds = $groupUserIds;
+                } else {
+                    $selectedUserIds = $selectedUserIds->intersect($groupUserIds)->values();
+                }
+            }
+
+            $entriesQuery->whereIn(
+                'user_id',
+                $selectedUserIds->isNotEmpty() ? $selectedUserIds : $organizationUserIds
+            );
+        } else {
+            $entriesQuery->where('user_id', $user->id);
+        }
+
+        $entries = $entriesQuery
             ->orderBy('start_time')
             ->get();
 
         $lines = [
-            'Date,Project,Task,Description,Duration (seconds),Billable',
+            'Date,Employee,Project,Task,Description,Duration (seconds),Billable',
         ];
 
         foreach ($entries as $entry) {
             $lines[] = implode(',', [
                 Carbon::parse($entry->start_time)->toDateString(),
+                $this->csvValue($entry->user?->name ?? 'Unknown User'),
                 $this->csvValue($entry->project?->name ?? 'No Project'),
                 $this->csvValue($entry->task?->title ?? ''),
                 $this->csvValue($entry->description ?? ''),
@@ -514,7 +498,7 @@ class ReportController extends Controller
         }
 
         $csv = implode("\n", $lines);
-        $fileName = 'report-'.$startDate.'-to-'.$endDate.'.csv';
+        $fileName = 'report-'.$startDate->toDateString().'-to-'.$endDate->toDateString().'.csv';
 
         return response($csv, 200, [
             'Content-Type' => 'text/csv',
@@ -770,9 +754,9 @@ class ReportController extends Controller
                 continue;
             }
 
-            $label = $this->normalizeToolLabel((string) ($item->name ?? ''), (string) ($item->type ?? 'app'));
-            $classification = $this->classifyProductivity($label, (string) ($item->type ?? 'app'));
-            $toolType = $this->guessToolType((string) ($item->type ?? 'app'));
+            $label = $this->activityProductivityService->normalizeToolLabel((string) ($item->name ?? ''), (string) ($item->type ?? 'app'));
+            $classification = $this->activityProductivityService->classifyProductivity($label, (string) ($item->type ?? 'app'));
+            $toolType = $this->activityProductivityService->guessToolType((string) ($item->type ?? 'app'));
             $toolKey = strtolower($toolType.'|'.$label);
 
             if (!isset($toolTotalsByKey[$toolKey])) {
@@ -853,7 +837,7 @@ class ReportController extends Controller
             ->sortByDesc('unproductive_duration')
             ->first(fn ($row) => (int) ($row['unproductive_duration'] ?? 0) > 0);
 
-        $selectedToolBreakdown = $this->buildToolBreakdown($activities);
+        $selectedToolBreakdown = $this->activityProductivityService->buildToolBreakdown($activities);
         $orgProductiveDuration = (int) $productiveTools->sum('total_duration');
         $orgUnproductiveDuration = (int) $unproductiveTools->sum('total_duration');
         $orgNeutralDuration = (int) $toolAnalytics->where('classification', 'neutral')->sum('total_duration');
@@ -944,9 +928,9 @@ class ReportController extends Controller
             $activityType = null;
 
             if ($latest) {
-                $toolLabel = $this->normalizeToolLabel((string) ($latest->name ?? ''), (string) ($latest->type ?? 'app'));
-                $classification = $this->classifyProductivity($toolLabel, (string) ($latest->type ?? 'app'));
-                $toolType = $this->guessToolType((string) ($latest->type ?? 'app'));
+                $toolLabel = $this->activityProductivityService->normalizeToolLabel((string) ($latest->name ?? ''), (string) ($latest->type ?? 'app'));
+                $classification = $this->activityProductivityService->classifyProductivity($toolLabel, (string) ($latest->type ?? 'app'));
+                $toolType = $this->activityProductivityService->guessToolType((string) ($latest->type ?? 'app'));
                 $activityType = (string) ($latest->type ?? 'app');
             }
 
@@ -1029,181 +1013,6 @@ class ReportController extends Controller
                 'employees_on_leave' => $employeeLiveRows->where('work_status', 'on_leave')->values(),
             ],
             'recent_screenshots' => $recentScreenshots,
-        ]);
-    }
-
-    private function guessToolType(string $activityType): string
-    {
-        $type = strtolower(trim($activityType));
-        return $type === 'url' ? 'website' : 'software';
-    }
-
-    private function normalizeToolLabel(string $name, string $activityType): string
-    {
-        $trimmed = trim($name);
-
-        if ($trimmed === '') {
-            return $this->guessToolType($activityType) === 'website' ? 'unknown-site' : 'unknown-app';
-        }
-
-        if (strtolower(trim($activityType)) === 'url') {
-            if (filter_var($trimmed, FILTER_VALIDATE_URL)) {
-                $host = (string) parse_url($trimmed, PHP_URL_HOST);
-                if ($host !== '') {
-                    return strtolower(preg_replace('/^www\./', '', $host));
-                }
-            }
-
-            if (preg_match('/([a-z0-9-]+\.)+[a-z]{2,}/i', $trimmed, $matches)) {
-                return strtolower(preg_replace('/^www\./', '', $matches[0]));
-            }
-        }
-
-        // Keep full app/window string so classifier can match terms like "YouTube" in "Chrome - YouTube".
-        return mb_substr($trimmed, 0, 120);
-    }
-
-    private function classifyProductivity(string $toolLabel, string $activityType): string
-    {
-        $text = strtolower($toolLabel);
-
-        $productiveKeywords = [
-            'github', 'gitlab', 'bitbucket', 'jira', 'confluence', 'notion', 'slack', 'teams', 'zoom',
-            'vscode', 'visual studio', 'intellij', 'pycharm', 'webstorm', 'phpstorm', 'terminal',
-            'powershell', 'cmd', 'postman', 'figma', 'miro', 'docs.google', 'sheets.google', 'drive.google',
-            'stackoverflow', 'learn.microsoft', 'developer.mozilla', 'trello', 'asana', 'linear', 'clickup',
-            'outlook', 'gmail', 'calendar.google', 'word', 'excel', 'powerpoint', 'meet.google',
-            'chat.openai', 'chatgpt', 'claude.ai', 'gemini.google', 'code', 'cursor', 'android studio',
-            'datagrip', 'dbeaver', 'tableplus', 'mysql workbench', 'navicat',
-        ];
-
-        $unproductiveKeywords = [
-            'youtube', 'netflix', 'primevideo', 'hotstar', 'spotify', 'instagram', 'facebook', 'twitter',
-            'x.com', 'reddit', 'snapchat', 'tiktok', 'discord', 'twitch', 'pinterest', '9gag',
-            'telegram', 'whatsapp', 'web.whatsapp', 'wa.me', 'fb.com', 'reels', 'shorts', 'cricbuzz', 'espncricinfo',
-        ];
-
-        $isProductive = collect($productiveKeywords)->contains(fn ($keyword) => str_contains($text, $keyword));
-        $isUnproductive = collect($unproductiveKeywords)->contains(fn ($keyword) => str_contains($text, $keyword));
-
-        if ($isUnproductive && !$isProductive) {
-            return 'unproductive';
-        }
-        if ($isProductive && !$isUnproductive) {
-            return 'productive';
-        }
-
-        if (strtolower(trim($activityType)) === 'idle') {
-            return 'neutral';
-        }
-
-        // Default non-idle activity to productive so monitored websites/software are visible
-        // unless explicitly flagged as unproductive.
-        if (in_array(strtolower(trim($activityType)), ['url', 'app'], true)) {
-            return 'productive';
-        }
-
-        return 'neutral';
-    }
-
-    private function buildToolBreakdown($activities): array
-    {
-        $rows = [];
-
-        foreach ($activities as $activity) {
-            $duration = max(0, (int) ($activity->duration ?? 0));
-            if ($duration <= 0) {
-                continue;
-            }
-
-            $label = $this->normalizeToolLabel((string) ($activity->name ?? ''), (string) ($activity->type ?? 'app'));
-            $classification = $this->classifyProductivity($label, (string) ($activity->type ?? 'app'));
-            $type = $this->guessToolType((string) ($activity->type ?? 'app'));
-            $key = strtolower($classification.'|'.$type.'|'.$label);
-
-            if (!isset($rows[$key])) {
-                $rows[$key] = [
-                    'label' => $label,
-                    'type' => $type,
-                    'classification' => $classification,
-                    'total_duration' => 0,
-                    'total_events' => 0,
-                ];
-            }
-
-            $rows[$key]['total_duration'] += $duration;
-            $rows[$key]['total_events'] += 1;
-        }
-
-        $grouped = collect(array_values($rows))->sortByDesc('total_duration')->values();
-
-        return [
-            'productive' => $grouped->where('classification', 'productive')->values(),
-            'unproductive' => $grouped->where('classification', 'unproductive')->values(),
-            'neutral' => $grouped->where('classification', 'neutral')->values(),
-        ];
-    }
-
-    private function buildCommonReportPayload($timeEntries): array
-    {
-        $enrichedEntries = $timeEntries->map(function ($entry) {
-            $duration = (int) ($entry->duration ?? 0);
-            if (!$entry->end_time && $entry->start_time) {
-                $duration = max(
-                    $duration,
-                    now()->getTimestamp() - Carbon::parse($entry->start_time)->getTimestamp()
-                );
-            }
-            $entry->effective_duration = (int) max(0, $duration);
-            return $entry;
-        });
-
-        $totalDuration = (int) $enrichedEntries->sum('effective_duration');
-        $billableDuration = (int) $enrichedEntries->where('billable', true)->sum('effective_duration');
-
-        $byProject = $enrichedEntries->groupBy('project_id')->map(function ($entries) {
-            return [
-                'project' => $entries->first()->project,
-                'total_time' => (int) $entries->sum('effective_duration'),
-                'entries' => $entries->values(),
-            ];
-        })->values();
-
-        $byUser = $enrichedEntries->groupBy('user_id')->map(function ($entries) {
-            return [
-                'user' => $entries->first()->user,
-                'total_time' => (int) $entries->sum('effective_duration'),
-                'entries' => $entries->values(),
-            ];
-        })->values();
-
-        return [
-            'entries' => $enrichedEntries,
-            'time_entries' => $enrichedEntries,
-            'total_time' => $totalDuration,
-            'billable_time' => $billableDuration,
-            'total_duration' => $totalDuration,
-            'billable_duration' => $billableDuration,
-            'total_hours' => round($totalDuration / 3600, 2),
-            'billable_hours' => round($billableDuration / 3600, 2),
-            'by_project' => $byProject,
-            'by_user' => $byUser,
-        ];
-    }
-
-    private function emptyReport(array $extra = []): array
-    {
-        return array_merge($extra, [
-            'entries' => [],
-            'time_entries' => [],
-            'total_time' => 0,
-            'billable_time' => 0,
-            'total_duration' => 0,
-            'billable_duration' => 0,
-            'total_hours' => 0,
-            'billable_hours' => 0,
-            'by_project' => [],
-            'by_user' => [],
         ]);
     }
 
