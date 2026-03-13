@@ -32,6 +32,6 @@ class Screenshot extends Model
 
     public function getRecordedAtAttribute(): string
     {
-        return (string) $this->created_at;
+        return $this->created_at?->toIso8601String() ?? '';
     }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
+  activityApi,
   attendanceApi,
   attendanceTimeEditApi,
   leaveApi,
@@ -108,6 +109,64 @@ const percentage = (value: number, total: number) => {
   if (!total) return 0;
   return Math.round((value / total) * 100);
 };
+
+const normalizeToolLabel = (name: string, activityType: string) => {
+  const trimmed = String(name || '').trim();
+  const normalizedType = String(activityType || '').toLowerCase();
+
+  if (!trimmed) {
+    return normalizedType === 'url' ? 'unknown-site' : 'unknown-app';
+  }
+
+  if (normalizedType === 'url') {
+    try {
+      const parsed = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+      return parsed.hostname.replace(/^www\./, '').toLowerCase();
+    } catch {
+      const match = trimmed.match(/([a-z0-9-]+\.)+[a-z]{2,}/i);
+      if (match?.[0]) {
+        return match[0].replace(/^www\./, '').toLowerCase();
+      }
+    }
+  }
+
+  return trimmed.slice(0, 120);
+};
+
+const classifyProductivity = (toolLabel: string, activityType: string) => {
+  const text = String(toolLabel || '').toLowerCase();
+  const normalizedType = String(activityType || '').toLowerCase();
+  const productiveKeywords = [
+    'github', 'gitlab', 'bitbucket', 'jira', 'confluence', 'notion', 'slack', 'teams', 'zoom',
+    'vscode', 'visual studio', 'intellij', 'pycharm', 'webstorm', 'phpstorm', 'terminal',
+    'powershell', 'cmd', 'postman', 'figma', 'miro', 'docs.google', 'sheets.google', 'drive.google',
+    'stackoverflow', 'learn.microsoft', 'developer.mozilla', 'trello', 'asana', 'linear', 'clickup',
+    'outlook', 'gmail', 'calendar.google', 'word', 'excel', 'powerpoint', 'meet.google',
+    'chat.openai', 'chatgpt', 'claude.ai', 'gemini.google', 'code', 'cursor', 'android studio',
+    'datagrip', 'dbeaver', 'tableplus', 'mysql workbench', 'navicat',
+  ];
+  const unproductiveKeywords = [
+    'youtube', 'netflix', 'primevideo', 'hotstar', 'spotify', 'instagram', 'facebook', 'twitter',
+    'x.com', 'reddit', 'snapchat', 'tiktok', 'discord', 'twitch', 'pinterest', '9gag',
+    'telegram', 'whatsapp', 'web.whatsapp', 'wa.me', 'fb.com', 'reels', 'shorts', 'cricbuzz', 'espncricinfo',
+  ];
+
+  const isProductive = productiveKeywords.some((keyword) => text.includes(keyword));
+  const isUnproductive = unproductiveKeywords.some((keyword) => text.includes(keyword));
+
+  if (isUnproductive && !isProductive) return 'unproductive';
+  if (isProductive && !isUnproductive) return 'productive';
+  if (normalizedType === 'idle') return 'neutral';
+  if (normalizedType === 'url' || normalizedType === 'app') return 'productive';
+  return 'neutral';
+};
+
+const productivityTone = (classification?: string | null) =>
+  classification === 'productive'
+    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    : classification === 'unproductive'
+      ? 'bg-rose-50 text-rose-700 border-rose-200'
+      : 'bg-slate-100 text-slate-600 border-slate-200';
 
 const defaultFilters = (): PersistedFilterState => {
   const dates = deriveDatesFromPreset('today');
@@ -277,6 +336,7 @@ export default function AdminDashboard() {
         attendanceResponse,
         overallResponse,
         insightsResponse,
+        websiteActivityResponse,
         leaveResponse,
         timeEditResponse,
         payrollResponse,
@@ -287,6 +347,7 @@ export default function AdminDashboard() {
         attendanceApi.summary({ start_date: filters.startDate, end_date: filters.endDate }),
         reportApi.overall({ start_date: filters.startDate, end_date: filters.endDate }),
         reportApi.employeeInsights({ start_date: filters.startDate, end_date: filters.endDate }),
+        activityApi.getAll({ start_date: filters.startDate, end_date: filters.endDate, type: 'url', page: 1 }),
         leaveApi.list({ status: 'pending' }),
         attendanceTimeEditApi.list({ status: 'pending' }),
         payrollApi.getRecords({ payroll_month: payrollMonth }),
@@ -299,6 +360,7 @@ export default function AdminDashboard() {
         attendance: attendanceResponse.data,
         overall: overallResponse.data,
         insights: insightsResponse.data,
+        websiteActivity: websiteActivityResponse.data?.data || [],
         pendingLeaves: leaveResponse.data?.data || [],
         pendingTimeEdits: timeEditResponse.data?.data || [],
         payrollRecords: payrollResponse.data?.data || [],
@@ -470,6 +532,7 @@ export default function AdminDashboard() {
   };
   const teamRankings = organizationData?.insights?.team_rankings?.by_efficiency || [];
   const payrollRecords = organizationData?.payrollRecords || [];
+  const organizationWebsiteActivity = organizationData?.websiteActivity || [];
   const pendingLeaves = organizationData?.pendingLeaves || [];
   const pendingTimeEdits = organizationData?.pendingTimeEdits || [];
   const notifications = organizationData?.notifications || [];
@@ -501,6 +564,7 @@ export default function AdminDashboard() {
   const employeeTrend = employeeOverall?.by_day || [];
   const calendarSummary: any = employeeCalendar?.summary || {};
   const latestAttendance: any = employeeStatus.latest_attendance;
+  const employeeLiveMonitoring: any = employeeInsights?.live_monitoring?.selected_user || null;
   const monthlyAttendancePercentage = percentage(
     Number(calendarSummary.present_days || 0),
     Number(calendarSummary.present_days || 0) + Number(calendarSummary.absent_days || 0)
@@ -514,6 +578,33 @@ export default function AdminDashboard() {
     unproductive: Number(selectedUserTools.unproductive?.reduce((sum: number, item: any) => sum + Number(item.total_duration || 0), 0) || 0),
     neutral: Number(selectedUserTools.neutral?.reduce((sum: number, item: any) => sum + Number(item.total_duration || 0), 0) || 0),
   };
+  const websiteUsageByEmployee = organizationWebsiteActivity.reduce((rows: any[], item: any) => {
+    const website = normalizeToolLabel(item.name || '', item.type || 'url');
+    const employeeName = item.user?.name || 'Unknown';
+    const classification = classifyProductivity(website, item.type || 'url');
+    const existing = rows.find((row) => row.employeeName === employeeName && row.website === website && row.classification === classification);
+
+    if (existing) {
+      existing.duration += Number(item.duration || 0);
+      existing.events += 1;
+      existing.lastUsedAt =
+        item.recorded_at && (!existing.lastUsedAt || +new Date(item.recorded_at) > +new Date(existing.lastUsedAt))
+          ? item.recorded_at
+          : existing.lastUsedAt;
+      return rows;
+    }
+
+    rows.push({
+      employeeName,
+      website,
+      classification,
+      duration: Number(item.duration || 0),
+      events: 1,
+      lastUsedAt: item.recorded_at || null,
+    });
+
+    return rows;
+  }, []).sort((a: any, b: any) => Number(b.duration || 0) - Number(a.duration || 0));
 
   const pageTitle =
     filters.scope === 'organization'
@@ -857,6 +948,54 @@ export default function AdminDashboard() {
                       emptyTitle="No admin notifications"
                       emptyDescription="This admin account has no recent notifications."
                     />
+                  ),
+                },
+                {
+                  id: 'monitoring',
+                  label: 'Monitoring',
+                  content: (
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                        <CompactList
+                          title="Live employee activity"
+                          description="Current tool and productivity state from live monitoring."
+                          rows={(liveMonitoring.all_users || []).slice(0, 6).map((row: any) => ({
+                            id: String(row.user?.id || row.user?.email),
+                            title: row.user?.name || 'Unknown employee',
+                            subtitle: `${row.current_tool || 'No active tool'} • ${row.work_status || 'inactive'}`,
+                            value: row.classification || 'neutral',
+                          }))}
+                          emptyTitle="No live monitoring data"
+                          emptyDescription="No employee live activity rows were returned."
+                        />
+                        <SurfaceCard className="p-5">
+                          <h3 className="text-lg font-semibold tracking-[-0.04em] text-slate-950">Website usage by employee</h3>
+                          <p className="mt-1 text-sm text-slate-500">When all employees are selected, this shows which websites were used and whether they were productive.</p>
+                          <div className="mt-4">
+                            <DataTable
+                              title="Organization website monitoring"
+                              description="Per-employee website usage with productivity labels."
+                              rows={websiteUsageByEmployee.slice(0, 10)}
+                              emptyMessage="No website activity was returned for the selected range."
+                              columns={[
+                                { key: 'employee', header: 'Employee', render: (row: any) => row.employeeName },
+                                { key: 'website', header: 'Website', render: (row: any) => row.website },
+                                {
+                                  key: 'classification',
+                                  header: 'Productivity',
+                                  render: (row: any) => (
+                                    <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold capitalize ${productivityTone(row.classification)}`}>
+                                      {row.classification}
+                                    </span>
+                                  ),
+                                },
+                                { key: 'duration', header: 'Duration', render: (row: any) => formatDuration(row.duration || 0) },
+                              ]}
+                            />
+                          </div>
+                        </SurfaceCard>
+                      </div>
+                    </div>
                   ),
                 },
               ]}
@@ -1217,33 +1356,60 @@ export default function AdminDashboard() {
                   id: 'monitoring',
                   label: 'Monitoring',
                   content: (
-                    <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-                      <CompactList
-                        title="Monitoring pulse"
-                        description="Signals from the employee monitoring analytics endpoint."
-                        rows={[
-                          {
-                            id: 'event-count',
-                            title: 'Recorded activity events',
-                            subtitle: 'App, website, and idle event count in the selected range',
-                            value: String(employeeStats.activity_events || 0),
-                          },
-                          {
-                            id: 'idle-duration',
-                            title: 'Idle duration',
-                            subtitle: 'Measured idle time from monitoring analytics',
-                            value: formatDuration(employeeStats.idle_total_duration || 0),
-                          },
-                          {
-                            id: 'screenshots-count',
-                            title: 'Screenshot captures',
-                            subtitle: 'Loaded from the screenshots endpoint',
-                            value: String(employeeScreenshots.length),
-                          },
-                        ]}
-                        emptyTitle="No monitoring data"
-                        emptyDescription="The current monitoring response did not return summary signals."
-                      />
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                        <CompactList
+                          title="Monitoring pulse"
+                          description="Signals from the employee monitoring analytics endpoint."
+                          rows={[
+                            {
+                              id: 'event-count',
+                              title: 'Recorded activity events',
+                              subtitle: 'App, website, and idle event count in the selected range',
+                              value: String(employeeStats.activity_events || 0),
+                            },
+                            {
+                              id: 'idle-duration',
+                              title: 'Idle duration',
+                              subtitle: 'Measured idle time from monitoring analytics',
+                              value: formatDuration(employeeStats.idle_total_duration || 0),
+                            },
+                            {
+                              id: 'screenshots-count',
+                              title: 'Screenshot captures',
+                              subtitle: 'Loaded from the screenshots endpoint',
+                              value: String(employeeScreenshots.length),
+                            },
+                          ]}
+                          emptyTitle="No monitoring data"
+                          emptyDescription="The current monitoring response did not return summary signals."
+                        />
+                        <SurfaceCard className="p-5">
+                          <h3 className="text-lg font-semibold tracking-[-0.04em] text-slate-950">Live activity status</h3>
+                          <p className="mt-1 text-sm text-slate-500">What this employee is doing right now and whether it is productive.</p>
+                          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+                            <div className="rounded-[22px] border border-slate-200/80 bg-slate-50/70 px-4 py-3">
+                              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Current tool</p>
+                              <p className="mt-2 font-semibold text-slate-950">{employeeLiveMonitoring?.current_tool || 'No active tool detected'}</p>
+                              <p className="mt-1 text-sm capitalize text-slate-500">{employeeLiveMonitoring?.tool_type || employeeLiveMonitoring?.activity_type || 'No tool type'}</p>
+                            </div>
+                            <div className="rounded-[22px] border border-slate-200/80 bg-slate-50/70 px-4 py-3">
+                              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Work status</p>
+                              <p className="mt-2 font-semibold capitalize text-slate-950">{employeeLiveMonitoring?.work_status?.replace('_', ' ') || 'inactive'}</p>
+                              <p className="mt-1 text-sm text-slate-500">{employeeLiveMonitoring?.is_working ? 'Timer active now' : 'No active timer right now'}</p>
+                            </div>
+                            <div className="rounded-[22px] border border-slate-200/80 bg-slate-50/70 px-4 py-3">
+                              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Productivity</p>
+                              <div className="mt-2">
+                                <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold capitalize ${productivityTone(employeeLiveMonitoring?.classification)}`}>
+                                  {employeeLiveMonitoring?.classification || 'neutral'}
+                                </span>
+                              </div>
+                              <p className="mt-2 text-sm text-slate-500">{formatDateTime(employeeLiveMonitoring?.last_activity_at)}</p>
+                            </div>
+                          </div>
+                        </SurfaceCard>
+                      </div>
                       {employeeScreenshots.length === 0 ? (
                         <EmptyStateCard
                           title="No screenshots found"
@@ -1251,18 +1417,27 @@ export default function AdminDashboard() {
                           icon={Camera}
                         />
                       ) : (
-                        <CompactList
-                          title="Recent screenshot captures"
-                          description="Compact screenshot summary to avoid oversized empty widgets."
-                          rows={employeeScreenshots.slice(0, 4).map((shot: any) => ({
-                            id: String(shot.id),
-                            title: formatDateTime(shot.recorded_at),
-                            subtitle: shot.filename || 'Captured screenshot',
-                            value: 'Captured',
-                          }))}
-                          emptyTitle="No screenshots found"
-                          emptyDescription="The screenshot endpoint did not return captures for this employee."
-                        />
+                        <SurfaceCard className="p-5">
+                          <h3 className="text-lg font-semibold tracking-[-0.04em] text-slate-950">Employee screenshots</h3>
+                          <p className="mt-1 text-sm text-slate-500">Recent captures for the selected employee with image previews.</p>
+                          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                            {employeeScreenshots.slice(0, 8).map((shot: any) => (
+                              <a
+                                key={shot.id}
+                                href={shot.path}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="overflow-hidden rounded-[22px] border border-slate-200 bg-white transition hover:border-sky-200"
+                              >
+                                <img src={shot.path} alt={shot.filename || `Screenshot ${shot.id}`} className="h-40 w-full object-cover" />
+                                <div className="space-y-1 p-4">
+                                  <p className="font-medium text-slate-950">{formatDateTime(shot.recorded_at)}</p>
+                                  <p className="text-xs text-slate-500">{shot.filename || 'Captured screenshot'}</p>
+                                </div>
+                              </a>
+                            ))}
+                          </div>
+                        </SurfaceCard>
                       )}
                     </div>
                   ),

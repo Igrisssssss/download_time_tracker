@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { attendanceApi, attendanceTimeEditApi, leaveApi, organizationApi, reportApi, reportGroupApi, userApi } from '@/services/api';
+import { activityApi, attendanceApi, attendanceTimeEditApi, leaveApi, organizationApi, reportApi, reportGroupApi, screenshotApi, userApi } from '@/services/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { hasAdminAccess } from '@/lib/permissions';
 import PageHeader from '@/components/dashboard/PageHeader';
@@ -19,6 +19,58 @@ const formatDuration = (seconds: number) => {
   const minutes = Math.floor((safe % 3600) / 60);
   return `${hours}h ${minutes}m`;
 };
+const formatDateTime = (value?: string | null) => (value ? new Date(value).toLocaleString() : 'Not available');
+const normalizeToolLabel = (name: string, activityType: string) => {
+  const trimmed = String(name || '').trim();
+  const normalizedType = String(activityType || '').toLowerCase();
+
+  if (!trimmed) return normalizedType === 'url' ? 'unknown-site' : 'unknown-app';
+
+  if (normalizedType === 'url') {
+    try {
+      const parsed = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+      return parsed.hostname.replace(/^www\./, '').toLowerCase();
+    } catch {
+      const match = trimmed.match(/([a-z0-9-]+\.)+[a-z]{2,}/i);
+      if (match?.[0]) return match[0].replace(/^www\./, '').toLowerCase();
+    }
+  }
+
+  return trimmed.slice(0, 120);
+};
+const classifyProductivity = (toolLabel: string, activityType: string) => {
+  const text = String(toolLabel || '').toLowerCase();
+  const normalizedType = String(activityType || '').toLowerCase();
+  const productiveKeywords = [
+    'github', 'gitlab', 'bitbucket', 'jira', 'confluence', 'notion', 'slack', 'teams', 'zoom',
+    'vscode', 'visual studio', 'intellij', 'pycharm', 'webstorm', 'phpstorm', 'terminal',
+    'powershell', 'cmd', 'postman', 'figma', 'miro', 'docs.google', 'sheets.google', 'drive.google',
+    'stackoverflow', 'learn.microsoft', 'developer.mozilla', 'trello', 'asana', 'linear', 'clickup',
+    'outlook', 'gmail', 'calendar.google', 'word', 'excel', 'powerpoint', 'meet.google',
+    'chat.openai', 'chatgpt', 'claude.ai', 'gemini.google', 'code', 'cursor', 'android studio',
+    'datagrip', 'dbeaver', 'tableplus', 'mysql workbench', 'navicat',
+  ];
+  const unproductiveKeywords = [
+    'youtube', 'netflix', 'primevideo', 'hotstar', 'spotify', 'instagram', 'facebook', 'twitter',
+    'x.com', 'reddit', 'snapchat', 'tiktok', 'discord', 'twitch', 'pinterest', '9gag',
+    'telegram', 'whatsapp', 'web.whatsapp', 'wa.me', 'fb.com', 'reels', 'shorts', 'cricbuzz', 'espncricinfo',
+  ];
+
+  const isProductive = productiveKeywords.some((keyword) => text.includes(keyword));
+  const isUnproductive = unproductiveKeywords.some((keyword) => text.includes(keyword));
+
+  if (isUnproductive && !isProductive) return 'unproductive';
+  if (isProductive && !isUnproductive) return 'productive';
+  if (normalizedType === 'idle') return 'neutral';
+  if (normalizedType === 'url' || normalizedType === 'app') return 'productive';
+  return 'neutral';
+};
+const productivityTone = (classification?: string | null) =>
+  classification === 'productive'
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : classification === 'unproductive'
+      ? 'border-rose-200 bg-rose-50 text-rose-700'
+      : 'border-slate-200 bg-slate-100 text-slate-600';
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 const formatMonth = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
@@ -118,6 +170,9 @@ export default function Attendance({ mode = 'full' }: AttendanceProps) {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [employeeProfile, setEmployeeProfile] = useState<UserProfile360 | null>(null);
+  const [employeeMonitoring, setEmployeeMonitoring] = useState<any | null>(null);
+  const [employeeMonitoringScreenshots, setEmployeeMonitoringScreenshots] = useState<any[]>([]);
+  const [employeeWebsiteUsage, setEmployeeWebsiteUsage] = useState<any[]>([]);
   const [employeeGroups, setEmployeeGroups] = useState<Array<{ id: number; name: string }>>([]);
   const [organizationMembersCount, setOrganizationMembersCount] = useState(0);
   const [isEmployeePanelLoading, setIsEmployeePanelLoading] = useState(false);
@@ -437,8 +492,72 @@ export default function Attendance({ mode = 'full' }: AttendanceProps) {
     };
   }, [endDate, isAdmin, mode, organization?.id, startDate, user?.id]);
 
+  useEffect(() => {
+    if (mode !== 'full') return;
+
+    const monitoringUserId = isAdmin ? selectedUserId : user?.id;
+    if (!monitoringUserId) return;
+
+    let active = true;
+
+    const fetchMonitoringPanel = async () => {
+      try {
+        const [insightsResponse, screenshotsResponse, websiteResponse] = await Promise.all([
+          reportApi.employeeInsights({ start_date: startDate, end_date: endDate, user_id: monitoringUserId }),
+          screenshotApi.getAll({ user_id: monitoringUserId, page: 1 }),
+          activityApi.getAll({ user_id: monitoringUserId, type: 'url', start_date: startDate, end_date: endDate, page: 1 }),
+        ]);
+
+        if (!active) return;
+
+        const websiteRows = ((websiteResponse.data as any)?.data || []).reduce((rows: any[], item: any) => {
+          const website = normalizeToolLabel(item.name || '', item.type || 'url');
+          const classification = classifyProductivity(website, item.type || 'url');
+          const existing = rows.find((row) => row.website === website && row.classification === classification);
+
+          if (existing) {
+            existing.duration += Number(item.duration || 0);
+            existing.events += 1;
+            existing.lastUsedAt =
+              item.recorded_at && (!existing.lastUsedAt || +new Date(item.recorded_at) > +new Date(existing.lastUsedAt))
+                ? item.recorded_at
+                : existing.lastUsedAt;
+            return rows;
+          }
+
+          rows.push({
+            website,
+            classification,
+            duration: Number(item.duration || 0),
+            events: 1,
+            lastUsedAt: item.recorded_at || null,
+          });
+          return rows;
+        }, []).sort((a: any, b: any) => Number(b.duration || 0) - Number(a.duration || 0));
+
+        setEmployeeMonitoring((insightsResponse.data as any) || null);
+        setEmployeeMonitoringScreenshots(((screenshotsResponse.data as any)?.data || []).slice(0, 8));
+        setEmployeeWebsiteUsage(websiteRows);
+      } catch (monitoringError) {
+        console.error('Attendance monitoring panel fetch failed:', monitoringError);
+        if (active) {
+          setEmployeeMonitoring(null);
+          setEmployeeMonitoringScreenshots([]);
+          setEmployeeWebsiteUsage([]);
+        }
+      }
+    };
+
+    void fetchMonitoringPanel();
+
+    return () => {
+      active = false;
+    };
+  }, [endDate, isAdmin, mode, selectedUserId, startDate, user?.id]);
+
   const selectedRow = rows.find((row) => row.user.id === selectedUserId) || rows[0];
   const employeePanelUser = employeeProfile?.user || user;
+  const attendancePanelUser = isAdmin ? selectedRow?.user : employeePanelUser;
   const pendingLeaveRequests = useMemo(
     () => leaveRequests.filter((item) => item.status === 'pending'),
     [leaveRequests]
@@ -506,6 +625,7 @@ export default function Attendance({ mode = 'full' }: AttendanceProps) {
     ],
     [employeeGroups, employeeProfile, organizationMembersCount]
   );
+  const employeeLiveMonitoring = employeeMonitoring?.live_monitoring?.selected_user || null;
 
   if (mode === 'time-edit') {
     return (
@@ -673,6 +793,97 @@ export default function Attendance({ mode = 'full' }: AttendanceProps) {
             </div>
           </SurfaceCard>
         ) : null}
+
+        <SurfaceCard className="lg:col-span-3 p-4">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-sky-700">Monitoring Panel</p>
+              <h2 className="mt-2 text-xl font-semibold text-slate-950">
+                {attendancePanelUser?.name || employeePanelUser?.name || 'Employee monitoring'}
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">Live activity, screenshot previews, and website productivity directly inside attendance.</p>
+            </div>
+            <div className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold capitalize ${productivityTone(employeeLiveMonitoring?.classification)}`}>
+              {employeeLiveMonitoring?.classification || 'neutral'}
+            </div>
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+            <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4">
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Current tool</p>
+              <p className="mt-2 text-sm font-semibold text-slate-950">{employeeLiveMonitoring?.current_tool || 'No active tool detected'}</p>
+              <p className="mt-1 text-xs capitalize text-slate-500">{employeeLiveMonitoring?.tool_type || employeeLiveMonitoring?.activity_type || 'No tool type'}</p>
+            </div>
+            <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4">
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Work status</p>
+              <p className="mt-2 text-sm font-semibold capitalize text-slate-950">{employeeLiveMonitoring?.work_status?.replace('_', ' ') || 'inactive'}</p>
+              <p className="mt-1 text-xs text-slate-500">{employeeLiveMonitoring?.is_working ? 'Timer active now' : 'No active timer right now'}</p>
+            </div>
+            <div className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4">
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Last activity</p>
+              <p className="mt-2 text-sm font-semibold text-slate-950">{formatDateTime(employeeLiveMonitoring?.last_activity_at)}</p>
+              <p className="mt-1 text-xs text-slate-500">{employeeMonitoring?.stats?.activity_events || 0} activity events in selected range</p>
+            </div>
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+            <div className="rounded-[24px] border border-slate-200 bg-white/85 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="font-semibold text-slate-950">Screenshot captures</h3>
+                <span className="text-xs text-slate-500">{employeeMonitoringScreenshots.length} shown</span>
+              </div>
+              {employeeMonitoringScreenshots.length === 0 ? (
+                <p className="mt-3 text-sm text-slate-500">No screenshots found for the selected employee in this attendance panel.</p>
+              ) : (
+                <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  {employeeMonitoringScreenshots.map((shot: any) => (
+                    <a
+                      key={shot.id}
+                      href={shot.path}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="overflow-hidden rounded-[20px] border border-slate-200 bg-white transition hover:border-sky-200"
+                    >
+                      <img src={shot.path} alt={shot.filename || `Screenshot ${shot.id}`} className="h-32 w-full object-cover" />
+                      <div className="space-y-1 p-3">
+                        <p className="text-xs font-semibold text-slate-950">{formatDateTime(shot.recorded_at)}</p>
+                        <p className="text-[11px] text-slate-500">{shot.filename || 'Captured screenshot'}</p>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-[24px] border border-slate-200 bg-white/85 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="font-semibold text-slate-950">Website productivity</h3>
+                <span className="text-xs text-slate-500">Selected range</span>
+              </div>
+              {employeeWebsiteUsage.length === 0 ? (
+                <p className="mt-3 text-sm text-slate-500">No website usage found for this employee.</p>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {employeeWebsiteUsage.slice(0, 6).map((item: any) => (
+                    <div key={`${item.website}-${item.classification}`} className="rounded-[20px] border border-slate-200 bg-slate-50/70 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold text-slate-950">{item.website}</p>
+                        <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold capitalize ${productivityTone(item.classification)}`}>
+                          {item.classification}
+                        </span>
+                      </div>
+                      <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
+                        <span>{formatDuration(item.duration || 0)}</span>
+                        <span>{item.events} events</span>
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-500">Last used: {formatDateTime(item.lastUsedAt)}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </SurfaceCard>
 
         <SurfaceCard className="lg:col-span-3 p-4">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">

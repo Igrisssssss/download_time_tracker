@@ -512,6 +512,8 @@ class ReportController extends Controller
             'start_date' => 'nullable|date',
             'end_date' => 'nullable|date',
             'user_id' => 'nullable|integer',
+            'group_ids' => 'nullable|array',
+            'group_ids.*' => 'integer',
             'q' => 'nullable|string|max:255',
         ]);
 
@@ -650,10 +652,69 @@ class ReportController extends Controller
             [$startDate, $endDate] = [$endDate->copy()->startOfDay(), $startDate->copy()->endOfDay()];
         }
 
+        $selectedGroupIds = collect($request->input('group_ids', []))
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn ($id) => $id > 0)
+            ->unique()
+            ->values();
+
         $usersQuery = User::where('organization_id', $currentUser->organization_id);
         if (!$this->canViewAll($currentUser)) {
             $usersQuery->where('id', $currentUser->id);
         } else {
+            if ($selectedGroupIds->isNotEmpty()) {
+                $groupUserIds = ReportGroup::where('organization_id', $currentUser->organization_id)
+                    ->whereIn('id', $selectedGroupIds)
+                    ->with('users:id')
+                    ->get()
+                    ->flatMap(fn (ReportGroup $group) => $group->users->pluck('id'))
+                    ->map(fn ($id) => (int) $id)
+                    ->unique()
+                    ->values();
+
+                if ($groupUserIds->isEmpty()) {
+                    return response()->json([
+                        'start_date' => $startDate->toDateString(),
+                        'end_date' => $endDate->toDateString(),
+                        'matched_users' => [],
+                        'selected_user' => null,
+                        'stats' => null,
+                        'activity_breakdown' => [],
+                        'selected_user_tools' => ['productive' => [], 'unproductive' => [], 'neutral' => []],
+                        'organization_tools' => ['productive' => [], 'unproductive' => []],
+                        'organization_summary' => [
+                            'productive_duration' => 0,
+                            'unproductive_duration' => 0,
+                            'neutral_duration' => 0,
+                            'productive_share' => 0,
+                            'unproductive_share' => 0,
+                        ],
+                        'employee_rankings' => [
+                            'most_productive' => null,
+                            'most_unproductive' => null,
+                            'by_productive_duration' => [],
+                            'by_unproductive_duration' => [],
+                        ],
+                        'team_rankings' => [
+                            'by_efficiency' => [],
+                            'top_productive' => null,
+                            'least_productive' => null,
+                        ],
+                        'live_monitoring' => [
+                            'selected_user' => null,
+                            'working_now' => [],
+                            'all_users' => [],
+                            'employees_active' => [],
+                            'employees_inactive' => [],
+                            'employees_on_leave' => [],
+                        ],
+                        'recent_screenshots' => [],
+                    ]);
+                }
+
+                $usersQuery->whereIn('id', $groupUserIds);
+            }
+
             if ($request->filled('q')) {
                 $term = trim((string) $request->q);
                 $usersQuery->where(function ($query) use ($term) {

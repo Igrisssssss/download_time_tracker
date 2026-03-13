@@ -14,6 +14,7 @@ interface DataTableProps<T> {
   columns: Column<T>[];
   rows: T[];
   emptyMessage: string;
+  headerAction?: ReactNode;
 }
 
 export default function DataTable<T>({
@@ -22,12 +23,18 @@ export default function DataTable<T>({
   columns,
   rows,
   emptyMessage,
+  headerAction,
 }: DataTableProps<T>) {
   return (
     <SurfaceCard className="overflow-hidden">
       <div className="border-b border-slate-200/80 px-5 py-4">
-        <h2 className="text-lg font-semibold tracking-[-0.04em] text-slate-950">{title}</h2>
-        {description ? <p className="mt-1 text-sm text-slate-500">{description}</p> : null}
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold tracking-[-0.04em] text-slate-950">{title}</h2>
+            {description ? <p className="mt-1 text-sm text-slate-500">{description}</p> : null}
+          </div>
+          {headerAction ? <div className="shrink-0">{headerAction}</div> : null}
+        </div>
       </div>
       <div className="overflow-x-auto">
         <table className="min-w-full text-sm">

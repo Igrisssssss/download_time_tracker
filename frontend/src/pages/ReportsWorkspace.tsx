@@ -24,6 +24,7 @@ import {
   FolderKanban,
   LineChart,
   ListFilter,
+  RefreshCw,
   TimerReset,
   Users,
   Waypoints,
@@ -113,6 +114,8 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
 
   const dataQuery = useQuery({
     queryKey: ['report-workspace-data', mode, startDate, endDate, query, selectedUserId, selectedGroupId],
+    refetchInterval: mode === 'timeline' || mode === 'web-app-usage' || mode === 'productivity' ? 10000 : false,
+    refetchIntervalInBackground: mode === 'timeline' || mode === 'web-app-usage' || mode === 'productivity',
     queryFn: async () => {
       if (mode === 'attendance') {
         const response = await reportApi.attendance({
@@ -149,6 +152,7 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
 
       if (mode === 'timeline') {
         const response = await activityApi.getAll({
+          user_id: selectedUserId ? Number(selectedUserId) : undefined,
           start_date: startDate,
           end_date: endDate,
           page: 1,
@@ -161,6 +165,7 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
           start_date: startDate,
           end_date: endDate,
           user_id: selectedUserId ? Number(selectedUserId) : undefined,
+          group_ids: selectedGroupId ? [Number(selectedGroupId)] : undefined,
           q: query || undefined,
         });
         return response.data;
@@ -232,7 +237,14 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
   const usageSelectedTools = usageData?.selected_user_tools || { productive: [], unproductive: [], neutral: [] };
   const usageMatchedUsers = usageData?.matched_users || [];
   const orgSummary = usageData?.organization_summary || {};
+  const usageOrganizationTools = usageData?.organization_tools || { productive: [], unproductive: [] };
   const employeeRankings = usageData?.employee_rankings?.by_productive_duration || [];
+  const hasSelectedEmployee = selectedUserId !== '';
+  const usageWorkedDuration = hasSelectedEmployee
+    ? Number(usageStats.total_duration || 0)
+    : Number(orgSummary.productive_duration || 0) + Number(orgSummary.unproductive_duration || 0) + Number(orgSummary.neutral_duration || 0);
+  const usageProductiveRows = hasSelectedEmployee ? usageSelectedTools.productive || [] : usageOrganizationTools.productive || [];
+  const usageUnproductiveRows = hasSelectedEmployee ? usageSelectedTools.unproductive || [] : usageOrganizationTools.unproductive || [];
 
   const handleExport = async () => {
     setExportMessage('');
@@ -257,6 +269,12 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
       setExportError(error?.response?.data?.message || 'Failed to export report.');
     }
   };
+
+  const renderPanelRefreshButton = () => (
+    <Button variant="ghost" size="sm" onClick={() => void dataQuery.refetch()} iconLeft={<RefreshCw className="h-4 w-4" />}>
+      Refresh
+    </Button>
+  );
 
   if (isLoading) {
     return <PageLoadingState label={`Loading ${pageTitle.title.toLowerCase()}...`} />;
@@ -352,6 +370,7 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
             description="Presence, leave, attendance rate, and current work state per employee."
             rows={attendanceRows}
             emptyMessage="No attendance rows found for the selected range."
+            headerAction={renderPanelRefreshButton()}
             columns={[
               { key: 'employee', header: 'Employee', render: (row: any) => <div><p className="font-medium text-slate-950">{row.user?.name}</p><p className="text-xs text-slate-500">{row.user?.email}</p></div> },
               { key: 'present', header: 'Present', render: (row: any) => `${row.days_present} / ${row.working_days_in_range}` },
@@ -379,6 +398,7 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
               description="Per-user totals, idle share, and latest activity."
               rows={byUser}
               emptyMessage="No employee rows found."
+              headerAction={renderPanelRefreshButton()}
               columns={[
                 { key: 'user', header: 'User', render: (row: any) => <div><p className="font-medium text-slate-950">{row.user?.name}</p><p className="text-xs text-slate-500">{row.user?.email}</p></div> },
                 { key: 'total', header: 'Total', render: (row: any) => formatDuration(row.total_duration || 0) },
@@ -388,8 +408,13 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
               ]}
             />
             <SurfaceCard className="p-5">
-              <h2 className="text-lg font-semibold text-slate-950">Daily Trend</h2>
-              <p className="mt-1 text-sm text-slate-500">Daily totals within the selected range.</p>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-950">Daily Trend</h2>
+                  <p className="mt-1 text-sm text-slate-500">Daily totals within the selected range.</p>
+                </div>
+                {renderPanelRefreshButton()}
+              </div>
               {byDay.length === 0 ? (
                 <div className="mt-6">
                   <PageEmptyState title="No trend data" description="Tracked work by day will appear here." />
@@ -434,6 +459,7 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
             description="Tracked duration, task volume, and current status by project."
             rows={projectRows}
             emptyMessage="No project data found."
+            headerAction={renderPanelRefreshButton()}
             columns={[
               { key: 'project', header: 'Project', render: (row: any) => <div><p className="font-medium text-slate-950">{row.name}</p><p className="text-xs text-slate-500">{row.description || 'No description'}</p></div> },
               { key: 'status', header: 'Status', render: (row: any) => row.status },
@@ -448,6 +474,7 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
             description="Task status and priority mapped to projects."
             rows={tasks}
             emptyMessage="No tasks found."
+            headerAction={renderPanelRefreshButton()}
             columns={[
               { key: 'title', header: 'Task', render: (row: any) => <div><p className="font-medium text-slate-950">{row.title}</p><p className="text-xs text-slate-500">{row.project?.name || 'No project'}</p></div> },
               { key: 'status', header: 'Status', render: (row: any) => row.status },
@@ -473,6 +500,7 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
             description="Recent app, website, and idle events in chronological order."
             rows={timelineRows.slice().sort((a: any, b: any) => +new Date(b.recorded_at) - +new Date(a.recorded_at))}
             emptyMessage="No timeline events found."
+            headerAction={renderPanelRefreshButton()}
             columns={[
               { key: 'recorded_at', header: 'When', render: (row: any) => new Date(row.recorded_at).toLocaleString() },
               { key: 'employee', header: 'Employee', render: (row: any) => row.user?.name || 'Unknown' },
@@ -487,18 +515,31 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
       {mode === 'web-app-usage' && (
         <>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <MetricCard label="Selected Employee" value={usageData?.selected_user?.name || 'Auto-select'} hint={usageData?.selected_user?.email || 'Using matched employees'} icon={Users} accent="sky" />
-            <MetricCard label="Worked" value={formatDuration(usageStats.total_duration || 0)} hint="Tracked duration" icon={TimerReset} accent="emerald" />
+            <MetricCard
+              label={hasSelectedEmployee ? 'Selected Employee' : 'Scope'}
+              value={hasSelectedEmployee ? usageData?.selected_user?.name || 'Selected employee' : 'All employees'}
+              hint={hasSelectedEmployee ? usageData?.selected_user?.email || 'Using selected employee filter' : selectedGroupId ? 'Team filter selected' : 'Organization-wide view'}
+              icon={Users}
+              accent="sky"
+            />
+            <MetricCard label="Worked" value={formatDuration(usageWorkedDuration)} hint={hasSelectedEmployee ? 'Tracked duration' : 'Tracked duration across current scope'} icon={TimerReset} accent="emerald" />
             <MetricCard label="Productive Share" value={`${Number(orgSummary.productive_share || 0).toFixed(1)}%`} hint="Organization average" icon={LineChart} accent="violet" />
-            <MetricCard label="Idle" value={formatDuration(usageStats.idle_total_duration || 0)} hint="Selected employee idle time" icon={Activity} accent="amber" />
+            <MetricCard
+              label={hasSelectedEmployee ? 'Idle' : 'Employees'}
+              value={hasSelectedEmployee ? formatDuration(usageStats.idle_total_duration || 0) : employeeRankings.length}
+              hint={hasSelectedEmployee ? 'Selected employee idle time' : 'Employees in current monitoring dataset'}
+              icon={Activity}
+              accent="amber"
+            />
           </div>
 
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <DataTable
-              title="Productive Tools"
-              description="Top productive websites and apps for the selected employee."
-              rows={usageSelectedTools.productive || []}
+              title={hasSelectedEmployee ? 'Productive Tools' : 'Top Productive Tools'}
+              description={hasSelectedEmployee ? 'Top productive websites and apps for the selected employee.' : 'Top productive websites and apps across the current scope.'}
+              rows={usageProductiveRows}
               emptyMessage="No productive tool usage found."
+              headerAction={renderPanelRefreshButton()}
               columns={[
                 { key: 'label', header: 'Tool', render: (row: any) => row.label },
                 { key: 'type', header: 'Type', render: (row: any) => row.type },
@@ -506,10 +547,11 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
               ]}
             />
             <DataTable
-              title="Unproductive Tools"
-              description="Top unproductive websites and apps for the selected employee."
-              rows={usageSelectedTools.unproductive || []}
+              title={hasSelectedEmployee ? 'Unproductive Tools' : 'Top Unproductive Tools'}
+              description={hasSelectedEmployee ? 'Top unproductive websites and apps for the selected employee.' : 'Top unproductive websites and apps across the current scope.'}
+              rows={usageUnproductiveRows}
               emptyMessage="No unproductive tool usage found."
+              headerAction={renderPanelRefreshButton()}
               columns={[
                 { key: 'label', header: 'Tool', render: (row: any) => row.label },
                 { key: 'type', header: 'Type', render: (row: any) => row.type },
@@ -520,9 +562,10 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
 
           <DataTable
             title="Top Productive Employees"
-            description="Employee ranking by productive duration from the current monitoring dataset."
+            description={hasSelectedEmployee ? 'Employee ranking by productive duration from the current monitoring dataset.' : 'Employee ranking by productive duration across the current monitoring dataset.'}
             rows={employeeRankings}
             emptyMessage="No employee ranking data found."
+            headerAction={renderPanelRefreshButton()}
             columns={[
               { key: 'employee', header: 'Employee', render: (row: any) => row.user?.name || 'Unknown' },
               { key: 'productive_duration', header: 'Productive Time', render: (row: any) => formatDuration(row.productive_duration || 0) },
@@ -536,8 +579,13 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
       {mode === 'custom-export' ? (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.1fr_0.9fr]">
           <SurfaceCard className="p-6">
-            <h2 className="text-lg font-semibold text-slate-950">Export Scope</h2>
-            <p className="mt-1 text-sm text-slate-500">Use the current filters to export the same report range used across dashboards.</p>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-950">Export Scope</h2>
+                <p className="mt-1 text-sm text-slate-500">Use the current filters to export the same report range used across dashboards.</p>
+              </div>
+              {renderPanelRefreshButton()}
+            </div>
             <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
                 <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Date Range</p>
@@ -559,8 +607,13 @@ export default function ReportsWorkspace({ mode }: { mode: ReportsWorkspaceMode 
           </SurfaceCard>
 
           <SurfaceCard className="p-6">
-            <h2 className="text-lg font-semibold text-slate-950">Data Preview</h2>
-            <p className="mt-1 text-sm text-slate-500">Current totals from the selected export scope.</p>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-950">Data Preview</h2>
+                <p className="mt-1 text-sm text-slate-500">Current totals from the selected export scope.</p>
+              </div>
+              {renderPanelRefreshButton()}
+            </div>
             <div className="mt-5 space-y-4">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-slate-500">Tracked time</span>

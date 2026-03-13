@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Activity;
 use App\Models\TimeEntry;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 
 class ActivityController extends Controller
 {
@@ -27,6 +28,7 @@ class ActivityController extends Controller
         $canViewAll = $this->canViewAll($user);
 
         $activities = Activity::query()
+            ->with(['user:id,name,email,role'])
             ->whereHas('user', function ($query) use ($user) {
                 $query->where('organization_id', $user->organization_id);
             })
@@ -36,10 +38,10 @@ class ActivityController extends Controller
                 $query->where('type', $type);
             })
             ->when($request->start_date, function ($query, $startDate) {
-                $query->where('recorded_at', '>=', $startDate);
+                $query->where('recorded_at', '>=', Carbon::parse((string) $startDate)->startOfDay());
             })
             ->when($request->end_date, function ($query, $endDate) {
-                $query->where('recorded_at', '<=', $endDate);
+                $query->where('recorded_at', '<=', Carbon::parse((string) $endDate)->endOfDay());
             })
             ->orderBy('recorded_at', 'desc')
             ->paginate(15);
