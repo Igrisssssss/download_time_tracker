@@ -1,14 +1,16 @@
-# TimeTrackPro Desktop
+# CareVance Tracker Desktop
 
-This desktop shell wraps the frontend and exposes desktop-only tracking APIs:
-- periodic screenshot capture
-- system idle-time checks
+The desktop app is an Electron 33 shell around the web frontend. It exposes desktop-only APIs for:
+
+- screenshot capture
+- system idle time
+- active window context
 
 ## Run
 
-1. Start backend API (`http://localhost:8000`)
-2. Start frontend (`http://localhost:5173`)
-3. Start desktop app:
+1. Start the backend API.
+2. Start the frontend app.
+3. Start the desktop shell:
 
 ```powershell
 cd desktop
@@ -16,66 +18,41 @@ npm install
 npm start
 ```
 
-By default Electron loads the deployed frontend:
+## URL Selection
+
+`desktop/main.cjs` reads the frontend URL from the `APP_URL` process environment variable.
+
+Default:
 
 ```text
-https://carevance-hrms-1.onrender.com
+http://localhost:5173
 ```
 
-For local development you can still override it to `localhost`.
-To change URL:
+Override for another local or deployed frontend:
 
 ```powershell
-$env:APP_URL="http://localhost:5173"
+$env:APP_URL="https://your-frontend-domain.com"
 npm start
 ```
 
-## Shared usage
-
-If you want multiple people on different PCs to use the same product and let admins see employee reports, everyone must use the same deployed backend and frontend.
-
-For this project, the intended shared setup is:
-
-- Frontend: `https://carevance-hrms-1.onrender.com`
-- Backend API: `https://carevance-hrms.onrender.com/api`
-
-With the default desktop build, users who install the app will open the deployed frontend automatically instead of `localhost`.
-
-## Build Windows installer
-
-Install dependencies:
+## Build Windows Artifacts
 
 ```powershell
 cd desktop
 npm install
-```
-
-Build Windows artifacts:
-
-```powershell
 npm run dist:win
 npm run dist:portable
 ```
 
-Output files are generated in `desktop/release/`. You will get files similar to:
+Outputs are written to `desktop/release/`.
 
-- `TimeTrack Pro-Setup-1.0.0-x64.exe`
-- `TimeTrack Pro-Portable-1.0.0-x64.exe`
+Typical files:
 
-Use the `Setup` `.exe` as the main installer you upload to GitHub Releases.
+- `CareVance Tracker-Setup-1.0.0-x64.exe`
+- `CareVance Tracker-Portable-1.0.0-x64.exe`
 
-Desktop and installer icons are loaded from `desktop/assets/icon.ico` and `desktop/assets/icon.png`.
+## Download Link Flow
 
-## Share download link
-
-After uploading the installer asset to GitHub Releases, point the web login button at:
-
-```text
-https://github.com/<owner>/<repo>/releases/latest/download/<installer-file-name>.exe
-```
-
-Example:
-
-```text
-https://github.com/acme/timetrackpro/releases/latest/download/TimeTrack%20Pro-Setup-1.0.0-x64.exe
-```
+- Upload the installer to a public URL such as GitHub Releases.
+- Put that URL in backend `DESKTOP_WINDOWS_DOWNLOAD_URL`.
+- The frontend can then use the backend endpoint `/api/downloads/desktop/windows`.

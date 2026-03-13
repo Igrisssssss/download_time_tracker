@@ -1,9 +1,9 @@
 {
-  "name": "timetrackpro-desktop",
+  "name": "carevance-desktop",
   "version": "1.0.0",
-  "description": "TimeTrack Pro desktop timer and activity tracker",
+  "description": "CareVance Tracker desktop timer and activity tracker",
   "private": true,
-  "author": "TimeTrack Pro",
+  "author": "CareVance",
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
@@ -12,8 +12,8 @@
     "dist:portable": "electron-builder --win portable --config.win.artifactName=\"${productName}-Portable-${version}-${arch}.${ext}\""
   },
   "build": {
-    "appId": "com.timetrackpro.desktop",
-    "productName": "TimeTrack Pro",
+    "appId": "com.carevance.tracker",
+    "productName": "CareVance Tracker",
     "icon": "assets/icon.ico",
     "files": [
       "main.cjs",
@@ -25,6 +25,7 @@
       "output": "release"
     },
     "asar": true,
+    "npmRebuild": false,
     "win": {
       "target": [
         "nsis"
@@ -39,7 +40,7 @@
       "perMachine": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "TimeTrack Pro"
+      "shortcutName": "CareVance Tracker"
     }
   },
   "devDependencies": {
